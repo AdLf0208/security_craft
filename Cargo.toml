@@ -1,0 +1,25 @@
+[package]
+# Port of SecurityCraft 1.10.2.1 (Geforce132/SecurityCraft, commit
+# c4d35b0c8bf85c2a94c37a1f8ce37ef5ce1a6aa8, MIT). Minecraft Java 1.21.1
+# NeoForge; the port targets Horizon 26.3 at the SDK build horizon-mod.toml
+# pins. Clean-room Rust rewrite from the mod's behaviour (FINDINGS.md);
+# local-only until publishing is approved, publishable under MIT with this
+# source.
+#
+# Cargo's name and version are not the mod's identity: horizon-mod.toml is.
+name = "securitycraft"
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+description = "SecurityCraft for Horizon: the keypad and the reinforced door (slice 1)"
+publish = false
+
+[dependencies]
+# The pinned SDK's API crate, fetched into .horizon/sdk/ by any `cargo horizon-mod` command (the
+# launcher builds against its own copy of the same build). Any other registry dependency must be
+# pinned with `horizon-launcher native-lock .` before building.
+horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }
+# The keypad stores a salted SHA-256 digest of its code, as upstream stores a salted PBKDF2 hash;
+# `src/runtime.rs` (the carried, byte-identical rules module) is the only user. It is this
+# package's one registry dependency, so the resolved `Cargo.lock` travels with the package.
+sha2 = "0.10"

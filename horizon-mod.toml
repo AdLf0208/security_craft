@@ -1,0 +1,25 @@
+id = "securitycraft"
+name = "SecurityCraft"
+version = "0.2.0"
+description = """SecurityCraft's keypad and reinforced door: a keypad stores a salted digest of a typed code,
+asks for it on a drawn panel of keys and, on a match, powers itself for three seconds; a reinforced
+door beside it opens on that redstone signal and closes when it runs out. The owner, the modules,
+the cameras, the mines and the lasers are not ported yet."""
+authors = ["Geforce132 and the SecurityCraft contributors", "AdLf0208"]
+# A native mod: Rust in src/, compiled by the launcher against the game build [native] pins,
+# beside data/ and assets/. The id is the resource namespace and the only identity: Cargo's
+# package name and version are not the mod's.
+api = "0.2"
+# "both" is the installation side, not the hook's: an integrated server belongs to the client
+# installation, so a LAN host or a single-player world needs both (the keypad's screen is drawn
+# by the client and its clicks are applied by the server).
+side = "both"
+# The one shared value every manifest carries ("May add blocks, items, mob effects and entity
+# types"). The keypad and the reinforced door are carried content, so this port really does
+# register blocks.
+capabilities = ["registries"]
+
+[native]
+game = "26.3"
+horizon = "0b14f8acfd97fa2c750e42795249dcc981178ca4"
+mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
