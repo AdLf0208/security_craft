@@ -27,10 +27,12 @@ ports/tools/build-slot.sh run --job sdk-sc --port ports/securitycraft --step che
 - `cargo horizon-mod` fetches the pinned SDK into `.horizon/sdk/` (gitignored, never packed).
   `build` packs the `.hmod`; it does **not** compile against the game — that is
   `horizon-launcher native-build . --instance <instance> --trust-native-code`.
-- **`src/runtime.rs` is byte-identical to the retired bundle's `runtime.rs` and must stay so**
-  (SHA-256 `1b2744a909c36c98d4c78dc09a28a060709c1fa17543ffed571f5c384fb1756a`): the behaviour
-  rules live there, `src/support.rs` and `src/lib.rs` only convert SDK types to theirs. New rule →
-  a test in `runtime.rs`; new glue → a private fn and a test in `support.rs`.
+- **`src/runtime.rs` carries the retired bundle's rules**, plus this port's review-fix rules
+  (minimum PIN length, `Action::TooShort`, the retry `Throttle`); its sha256 is
+  `8f78aba553247a123cac17888e593b81c52c84c230d0f95de010c0b97ecb03f3` (the pre-review carried file was
+  `1b2744a909c36c98d4c78dc09a28a060709c1fa17543ffed571f5c384fb1756a`): the behaviour rules live there,
+  `src/support.rs` and `src/lib.rs` only convert SDK types to theirs. New rule → a test in
+  `runtime.rs`; new glue → a private fn and a test in `support.rs`.
 - Only the API the SDK publishes: `cargo horizon-mod hooks <text>` finds the exact method; never
   guess a name, and record an API gap in `notes.md` instead of faking one.
 - The delivered package is `securitycraft.hmod` **in the port root**, never in `target/`;

@@ -2,5 +2,8 @@
     "block.securitycraft.keypad": "Keypad",
     "item.securitycraft.keypad_item": "Key Panel",
     "block.securitycraft.iron_door_reinforced": "Reinforced Door",
-    "itemGroup.securitycraft": "SecurityCraft"
+    "itemGroup.securitycraft": "SecurityCraft",
+    "item.securitycraft.harming_module": "Harming Module",
+    "death.attack.securitycraft.incorrectPasscode": "%s entered an incorrect code",
+    "death.attack.securitycraft.incorrectPasscode.player": "%1$s entered an incorrect code whilst fighting %2$s"
 }

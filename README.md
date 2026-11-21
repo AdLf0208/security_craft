@@ -1,57 +1,62 @@
-# Security Craft — a Horizon port
+# SecurityCraft (keypad, reinforced door, harming module) — Horizon native mod
 
-**Security Craft** is a Minecraft mod. Source code for the Minecraft mod "SecurityCraft". This repository is a **port of it to [Horizon](https://github.com/horizon-rust/horizon)**, the Rust engine for Minecraft Java 26.3. It carries the complete source of the port plus the content files it ships, and installs as a single `.hmod` package.
+The SecurityCraft port for **Horizon**, as a flat SDK package: mod API **0.2**, built
+against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`.
 
-Upstream: [Geforce132/SecurityCraft](https://github.com/Geforce132/SecurityCraft) — licence **MIT**.
+- **`horizon-mod.toml`** — the only manifest and the only identity
+  (`id = "securitycraft"`, `version = "0.2.2"`, `side = "both"`, `[native]` pins).
+- **`src/runtime.rs`** — the pure rules (code shape, salted digest, verdict, entry,
+  mode, signal countdown, module permission and wrong-code damage) and their tests.
+- **`src/support.rs`** — the game glue: the block entity's saved data (code, salt,
+  owner, modules), the screen's key rectangles and drawing, the menu buttons, the
+  redstone, the module install, the wrong-code damage, the module drop and the
+  harness commands.
+- **`src/lib.rs`** — the one `impl mod_api::Hooks`, the keypad's Parts and the key
+  panel item's Part (which records the owner).
+- **`assets/`, `data/`** — the carried content: the `securitycraft:keypad` block and
+  its `keypad_item`, the `securitycraft:iron_door_reinforced` block, the harming
+  module (`securitycraft:harming_module`, its recipe and its
+  `securitycraft:incorrect_passcode` damage type), the jar's blockstates, models,
+  textures, loot, recipes, tag and lang, plus the keypad's content menu type.
+- **`securitycraft.hmod`** — the delivered package (built by
+  `cargo horizon-mod build`, copied out of `target/`; no `Cargo.lock` inside).
+- **`FINDINGS.md`** — the upstream behaviour read; **`notes.md`** — scope, hook map,
+  deviations, verification and gaps.
 
-| | |
-|---|---|
-| Upstream mod | Security Craft ([source](https://github.com/Geforce132/SecurityCraft)) |
-| Ported to | Horizon 0b14f8a, Minecraft Java 26.3, mod API `0.2` |
-| Package | `securitycraft.hmod` (install it with the Horizon launcher) |
-| Licence | **MIT** — the upstream mod's licence; see [Licence and credit](#licence-and-credit) |
+## Build and check
 
-## What this port implements
+The campaign's `build-slot.sh` is a **lease**; the commands inside are the SDK tool's
+own. Builds that need `cargo-horizon-mod` run locally (`BUILD_LOCAL=1`):
 
-- Keypads, reinforced doors and the rest of SecurityCraft's block protection, ported to Hori
-
-## Not yet ported
-
-- **No in-game run at `0b14f8a`** — no launcher and no game build at this pin (trap 9). Everything
-- **No `BlockMetadata` from a `&dyn LevelHost`** (trap 3): `powered` is read from the serialised
-- **A registry dependency needs `horizon-launcher native-lock .`** on the building machine
-- **The slice's own gaps are unchanged** from the retired bundle: owner/allowlist/denylist, the
-
-## Installing
-
-1. Install the [Horizon launcher](https://github.com/horizon-rust/horizon/releases) (0.2.70 or newer).
-2. Add `securitycraft.hmod` to the instance's mods.
-3. The package is pinned to a specific Horizon build; the launcher checks that pin.
-
-## Licence and credit
-
-Security Craft was created by its upstream authors; the code, models and assets in the original mod
-remain theirs and are used here under **MIT**. The Rust in this repository is a clean-room
-rewrite for Horizon, not a translation of the original source.
-
-- `LICENSE` — the upstream licence text.
-- `LICENSE-NOTICE.md` — what this port carries and where it came from.
-- The upstream project: https://github.com/Geforce132/SecurityCraft
-
-## Technical details
-
-```
-horizon-mod.toml   package manifest (id, version, api, [native] pin)
-Cargo.toml         the crate; depends on `horizon-mod-api` from the fetched SDK
-src/               lib.rs (the one `impl Hooks`), runtime.rs (pure logic + tests), glue
-assets/ data/      the content the package ships
-tools/             content generators and the e2e scenario
+```sh
+ports/tools/build-slot.sh run --job W1-securitycraft --port ports/securitycraft --step test -- \
+    bash -c 'cd ports/securitycraft && CARGO_INCREMENTAL=0 cargo test --offline'
+ports/tools/build-slot.sh run --job W1-securitycraft --port ports/securitycraft --step lint -- \
+    bash -c 'cd ports/securitycraft && cargo fmt --check &&
+        cargo clippy --all-targets --offline -- -D warnings'
+BUILD_LOCAL=1 ports/tools/build-slot.sh run --job W1-securitycraft --port ports/securitycraft \
+    --step build -- bash -c 'cd ports/securitycraft && rm -f Cargo.lock &&
+        CARGO_INCREMENTAL=0 cargo horizon-mod build'
+BUILD_LOCAL=1 ports/tools/build-slot.sh run --job W1-securitycraft --port ports/securitycraft \
+    --step check -- bash -c 'cd ports/securitycraft &&
+        cargo horizon-mod check securitycraft.hmod &&
+        cargo horizon-mod fits securitycraft.hmod --build 0a875da'
 ```
 
-- Build: `cargo horizon-mod build` (packages; it does not compile against the game).
-- Test: `cargo test`, `cargo clippy --all-targets -- -D warnings`.
-- In-game: `ports/tools/launcher-game.sh run securitycraft` in the campaign tree, or install the
-  `.hmod` and play; the harness scenario is `tools/e2e.sh`.
+`cargo horizon-mod` fetches the pinned SDK into `.horizon/sdk/` (gitignored, never
+packed). `build` **packs** the `.hmod`; it does not compile against the game — that is
+the launcher's `native-build`.
 
-This repository is generated from the campaign's port at `ports/securitycraft/`; the port's own
-`notes.md` is the full record (decisions, traps, evidence).
+## In game
+
+`ports/tools/launcher-game.sh build securitycraft --port ports/securitycraft` compiles
+this package into the pinned Nightly and exports it; `tools/e2e.sh` then drives a real
+game with `horizon-ctl` (place, screen keys, wrong/right codes, module install, health,
+recipe, break drops). `SELFTEST=1` and `SELFTEST=harming` prove the assertions can
+fail, and `GAME=$CONTROL_GAME` runs the same scenario on an unmodified game, which
+fails at the first mod id. The evidence is under
+`ports/_shared/evidence/securitycraft-e2e/`.
+
+The mod is **local-only** until the maintainer approves publishing
+(ARCHITECTURE.md §8); the upstream jar and its assets are MIT.

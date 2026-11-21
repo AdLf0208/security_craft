@@ -19,19 +19,26 @@
 // beside the door. The reinforced door itself has no code: it is the carried
 // `minecraft:iron_door` template with the jar's textures and loot.
 
+use std::collections::BTreeMap;
+use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use mod_api::{
-    BlockEntityTickEvent, ClientHost, Compound, DrawContext, Host, InteractionResult, LevelHost,
-    LevelRef, MenuButtonEvent, ModContainer, RandomSource, Screen, ScreenClickEvent,
-    ScreenDrawEvent, ServerHost, StateForPlacementEvent, Tag, Text,
+    BlockDropsEvent, BlockEntityTickEvent, ClientHost, Compound, DrawContext, Host,
+    HostTransaction, InteractionResult, ItemDrop, ItemKey, ItemPlace, ItemResource, ItemStack,
+    LevelHost, LevelRef, MenuButtonEvent, ModContainer, OnBlockPlacedByEvent, RandomSource, Screen,
+    ScreenClickEvent, ScreenDrawEvent, ServerHost, StateForPlacementEvent, Tag, Text,
 };
 
 use crate::runtime::{
-    Action, Button, DEFAULT_SIGNAL_TICKS, Entry, Mode, after_submit, button, facing_from_yaw,
-    hash_code, new_salt, tick_signal, valid_code,
+    Action, Button, DEFAULT_SIGNAL_TICKS, Entry, Mode, Throttle, after_submit, button,
+    facing_from_yaw, hash_code, may_install, new_salt, tick_signal, valid_code, wrong_code_damage,
 };
 
 /// The keypad block; its item (`securitycraft:keypad_item`) places it.
 pub(crate) const KEYPAD: &str = "securitycraft:keypad";
+/// The key panel item: the item part that records the keypad's owner.
+pub(crate) const KEYPAD_ITEM: &str = "securitycraft:keypad_item";
 /// The reinforced door block, whose item is the block's own (the double-high
 /// placement of `minecraft:iron_door`).
 pub(crate) const DOOR: &str = "securitycraft:iron_door_reinforced";
@@ -53,6 +60,30 @@ const KEY_MODE: &str = "mode";
 const KEY_ENTRY: &str = "entry";
 const KEY_STATUS: &str = "status";
 const KEY_SIGNAL: &str = "signal";
+/// The UUID (32 lowercase hex digits, no dashes) of the player who placed the keypad.
+const KEY_OWNER: &str = "owner";
+/// The module ids installed in the keypad, as a list of strings.
+const KEY_MODULES: &str = "modules";
+
+/// The harming module's item id: the one module this slice installs.
+pub(crate) const HARMING_MODULE: &str = "securitycraft:harming_module";
+/// The damage type a wrong code uses (`data/securitycraft/damage_type/incorrect_passcode.json`),
+/// upstream's `CustomDamageSources.INCORRECT_PASSCODE`.
+pub(crate) const INCORRECT_PASSCODE: &str = "securitycraft:incorrect_passcode";
+
+/// The harming module's resolved item identity. A `block_drops` listener is given a
+/// `LevelHost`, not a `Host`, so it cannot resolve an id; the key is stored once at
+/// registration instead.
+static HARMING_MODULE_ITEM: OnceLock<ItemKey> = OnceLock::new();
+
+/// Store the harming module's resolved item identity (`register`).
+pub(crate) fn set_harming_module_item(item: ItemKey) {
+    let _ = HARMING_MODULE_ITEM.set(item);
+}
+
+fn harming_module_item() -> Option<ItemKey> {
+    HARMING_MODULE_ITEM.get().copied()
+}
 
 /// The block property the keypad's redstone and its "powered" look read.
 const POWERED: &str = "powered";
@@ -63,6 +94,9 @@ const STATUS_WRONG: i32 = 1;
 const STATUS_SET: i32 = 2;
 const STATUS_OPENED: i32 = 3;
 const STATUS_EMPTY: i32 = 4;
+/// The screen's "too short / locked out" answers.
+const STATUS_TOO_SHORT: i32 = 5;
+const STATUS_LOCKED: i32 = 6;
 
 /// The screen's button grid: 1-9, then backspace, 0 and submit. The same
 /// rectangles are hit-tested by `screen_click` and drawn by `screen_draw`, both
@@ -154,6 +188,55 @@ fn has(nbt: &Compound, name: &str) -> bool {
     tag(nbt, name).is_some()
 }
 
+/// The owner a keypad saved, `None` for an unowned one (an old save, or a
+/// dispenser place). The UUID is 32 lowercase hex digits, the same spelling
+/// `format!("{uuid:032x}")` writes.
+fn owner_of(nbt: &Compound) -> Option<u128> {
+    let hex = string(nbt, KEY_OWNER)?;
+    if hex.len() != 32 {
+        return None;
+    }
+    u128::from_str_radix(&hex, 16).ok()
+}
+
+/// The modules a keypad saved, in install order.
+fn modules(nbt: &Compound) -> Vec<String> {
+    match tag(nbt, KEY_MODULES) {
+        Some(Tag::List(values)) => values
+            .iter()
+            .filter_map(|value| match value {
+                Tag::String(text) => Some(text.to_string_lossy()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether `module` is installed. Upstream's `IModuleInventory.hasModule`.
+fn has_module(nbt: &Compound, module: &str) -> bool {
+    modules(nbt).iter().any(|installed| installed == module)
+}
+
+/// Installs `module`, once: upstream's `insertModule` refuses a second module of
+/// a type the block already has.
+fn add_module(nbt: &mut Compound, module: &str) {
+    let mut installed = modules(nbt);
+    if !installed.iter().any(|existing| existing == module) {
+        installed.push(module.to_owned());
+    }
+    put(
+        nbt,
+        KEY_MODULES,
+        Tag::List(
+            installed
+                .into_iter()
+                .map(|id| Tag::String(id.as_str().into()))
+                .collect(),
+        ),
+    );
+}
+
 // --- the world ------------------------------------------------------------
 
 /// The authoritative level the server acts in now: the one a block entity's
@@ -200,6 +283,28 @@ pub(crate) fn on_block_entity() -> Option<Compound> {
     Some(Compound::new())
 }
 
+/// The keypad item placed its block: the placer becomes the keypad's owner.
+///
+/// Upstream's `Block.setPlacedBy` gives an `IOwnable` block its owner, and the owner is
+/// who may install modules (`ModuleItem.useOn`) and open a fresh keypad's set screen.
+/// A dispenser place has no placer and leaves the keypad unowned.
+pub(crate) fn on_block_placed_by(host: &mut dyn ServerHost, event: &mut OnBlockPlacedByEvent<'_>) {
+    let Some(placer) = event.placer else {
+        return;
+    };
+    let Some(level) = in_place_level(host) else {
+        return;
+    };
+    let Some(entity) = host.block_entity(level, event.pos) else {
+        return;
+    };
+    let Some(mut data) = entity.data(&*host) else {
+        return;
+    };
+    set_string(&mut data, KEY_OWNER, &format!("{:032x}", placer.uuid()));
+    let _ = entity.replace_data(host, data);
+}
+
 /// A keypad block entity ticks: the signal countdown and the menu's data slots
 /// (`EntityBlock.getTicker`).
 pub(crate) fn on_ticks(event: &mut mod_api::BlockEntityTicksEvent<'_>) {
@@ -208,8 +313,13 @@ pub(crate) fn on_ticks(event: &mut mod_api::BlockEntityTicksEvent<'_>) {
 
 /// The data slots the screen reads: mode, typed length, status, code-set flag,
 /// powered flag and the signal left.
-fn data_slots(host: &dyn Host, level: LevelRef, pos: [i32; 3], nbt: &Compound) -> Vec<i32> {
-    let typed = entry_at(pos).len();
+fn data_slots(
+    host: &dyn Host,
+    level: LevelRef,
+    pos: [i32; 3],
+    nbt: &Compound,
+    typed: usize,
+) -> Vec<i32> {
     vec![
         int(nbt, KEY_MODE),
         i32::try_from(typed).unwrap_or(i32::MAX),
@@ -238,7 +348,11 @@ pub(crate) fn on_tick(host: &mut dyn ServerHost, event: &mut BlockEntityTickEven
             host.set_block_property(pos, POWERED, "false");
         }
     }
-    let slots = data_slots(&*host, level, pos, &fields.nbt);
+    let typed = level
+        .dimension()
+        .id(&*host)
+        .map_or(0, |dimension| typed_at_keypad(&dimension, pos));
+    let slots = data_slots(&*host, level, pos, &fields.nbt, typed);
     if fields.data != slots {
         fields.data = slots;
     }
@@ -255,11 +369,35 @@ pub(crate) fn on_use(
 ) -> Option<InteractionResult> {
     let pos = click.pos;
     let level = in_place_level(host)?;
+    let entity = host.block_entity(level, pos)?;
+    let mut data = entity.data(&*host)?;
+    // A module in the owner's hand is installed first, as upstream's `ModuleItem.useOn`
+    // runs before the block's own use. A stranger's module, a second one of a type the
+    // keypad already has and any other held item all fall through to the menu below.
+    if let Some(stack) = click.stack
+        && stack.item().id(&*host) == HARMING_MODULE
+        && may_install(owner_of(&data), click.player)
+        && !has_module(&data, HARMING_MODULE)
+    {
+        add_module(&mut data, HARMING_MODULE);
+        if entity.replace_data(host, data).is_err() {
+            return None;
+        }
+        let resource = ItemResource::of(stack);
+        let hand = ItemPlace::PlayerHand {
+            player: click.player,
+            hand: click.hand,
+        };
+        let _ = host.transaction(|host, tx| {
+            // A creative player's hand gives without losing any, as vanilla's creative use does.
+            hand.extract(host, tx, &resource, 1);
+            Ok::<(), ()>(())
+        });
+        return Some(InteractionResult::SuccessServer);
+    }
     if powered_at(&*host, level, pos) {
         return Some(InteractionResult::Fail);
     }
-    let entity = host.block_entity(level, pos)?;
-    let mut data = entity.data(&*host)?;
     let mode = if has(&data, KEY_CODE) {
         Mode::Check
     } else {
@@ -268,10 +406,12 @@ pub(crate) fn on_use(
     set_int(&mut data, KEY_MODE, mode.code());
     set_int(&mut data, KEY_STATUS, STATUS_NONE);
     drop_key(&mut data, KEY_ENTRY);
-    let slots = data_slots(&*host, level, pos, &data);
+    let slots = data_slots(&*host, level, pos, &data, 0);
     let _ = entity.replace_data(host, data);
     let _ = entity.set_data_slots(host, slots);
-    store_entry(pos, &Entry::new());
+    if let Some(session) = session_of(&*host, level, pos, click.player) {
+        clear_session(&session);
+    }
     None
 }
 
@@ -312,6 +452,8 @@ pub(crate) fn on_screen_draw(_host: &dyn ClientHost, event: &mut ScreenDrawEvent
         STATUS_SET => ("Code set", 0xff00_6400),
         STATUS_OPENED => ("Door opened", 0xff00_6400),
         STATUS_EMPTY => ("Type a code first", 0xff8b_0000),
+        STATUS_TOO_SHORT => ("At least 4 digits", 0xff8b_0000),
+        STATUS_LOCKED => ("Wait a moment", 0xff8b_0000),
         _ if mode == Mode::Set => ("Set a code", 0xff40_4040),
         _ => ("Enter the code", 0xff40_4040),
     };
@@ -365,40 +507,104 @@ pub(crate) fn on_screen_click(event: &mut ScreenClickEvent<'_>) -> Option<i32> {
 
 // --- the menu -------------------------------------------------------------
 
-/// The digits typed into an open keypad screen, per keypad position.
-///
-/// In memory only, on purpose: the block entity's compound is saved to disk, and
-/// a typed passcode must not be recoverable from a save. Opening the screen,
-/// pressing Enter and the end of the process all forget it, so a save/reload
-/// reloads a keypad with no typed digits, never with a PIN.
-static TYPED: std::sync::Mutex<Vec<([i32; 3], Entry)>> = std::sync::Mutex::new(Vec::new());
+/// One player's input session at one keypad in one world: the dimension's key, the block
+/// position and the player. A typed digit belongs to exactly this triple, so a second player at
+/// the same keypad, or a keypad at the same coordinates in another dimension, never sees or
+/// submits someone else's input.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Session {
+    dimension: String,
+    pos: [i32; 3],
+    player: u128,
+}
 
-fn typed() -> std::sync::MutexGuard<'static, Vec<([i32; 3], Entry)>> {
+impl Session {
+    fn new(dimension: impl Into<String>, pos: [i32; 3], player: u128) -> Self {
+        Self {
+            dimension: dimension.into(),
+            pos,
+            player,
+        }
+    }
+}
+
+/// The digits typed into each open keypad session.
+///
+/// In memory only, on purpose: the block entity's compound is saved to disk, and a typed
+/// passcode must not be recoverable from a save. A session's digits are forgotten on **open**,
+/// on **close** (the player closed the screen, walked away, died, changed level or left) and on
+/// submit, so a reopened keypad always starts empty and a save/reload reloads no digits.
+static TYPED: Mutex<BTreeMap<Session, Entry>> = Mutex::new(BTreeMap::new());
+
+/// The failed-verification budget of each session. It outlives a screen close on purpose: a
+/// retry limit is only a limit if closing the screen does not reset it.
+static ATTEMPTS: Mutex<BTreeMap<Session, Throttle>> = Mutex::new(BTreeMap::new());
+
+fn typed() -> MutexGuard<'static, BTreeMap<Session, Entry>> {
     TYPED.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
-/// The digits typed at `pos`, empty when none.
-fn entry_at(pos: [i32; 3]) -> Entry {
+fn attempts() -> MutexGuard<'static, BTreeMap<Session, Throttle>> {
+    ATTEMPTS.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// The session of `player` at `pos` in `level`, when the level's dimension resolves.
+fn session_of(host: &dyn Host, level: LevelRef, pos: [i32; 3], player: u128) -> Option<Session> {
+    Some(Session::new(level.dimension().id(host)?, pos, player))
+}
+
+/// The digits typed in `session`, empty when none.
+fn entry_at(session: &Session) -> Entry {
+    typed().get(session).cloned().unwrap_or_default()
+}
+
+/// Remembers the digits typed in `session`, or forgets them when the entry is empty.
+fn store_entry(session: &Session, entry: &Entry) {
+    let mut guard = typed();
+    if entry.is_empty() {
+        guard.remove(session);
+    } else {
+        guard.insert(session.clone(), entry.clone());
+    }
+}
+
+/// Forgets one session's digits (its keypad opened, closed, or the entry was submitted).
+fn clear_session(session: &Session) {
+    typed().remove(session);
+}
+
+/// Forgets every session's digits a player owns: the player's menu closed, or they left.
+fn clear_player(player: u128) {
+    typed().retain(|session, _| session.player != player);
+}
+
+/// Forgets every session's digits at one keypad, whichever player typed them (the harness code
+/// control re-sets the keypad, so no stale entry may remain).
+fn clear_keypad(dimension: &str, pos: [i32; 3]) {
+    typed().retain(|session, _| !(session.dimension == dimension && session.pos == pos));
+}
+
+/// The masked length the screen shows for a keypad, from the first session with digits there.
+fn typed_at_keypad(dimension: &str, pos: [i32; 3]) -> usize {
     typed()
         .iter()
-        .find(|(at, _)| *at == pos)
-        .map(|(_, entry)| entry.clone())
-        .unwrap_or_default()
+        .find(|(session, _)| session.dimension == dimension && session.pos == pos)
+        .map_or(0, |(_, entry)| entry.len())
+}
+
+/// The wall clock in milliseconds, the time base the retry budget uses.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 /// Drops a typed-digit key written by the retired build, so an existing world
 /// stops leaking a PIN on its next save. Nothing reads the key any more.
 fn scrub_legacy_entry(nbt: &mut Compound) {
     drop_key(nbt, KEY_ENTRY);
-}
-
-/// Remembers the digits typed at `pos`, or forgets them when the entry is empty.
-fn store_entry(pos: [i32; 3], entry: &Entry) {
-    let mut guard = typed();
-    guard.retain(|(at, _)| *at != pos);
-    if !entry.is_empty() {
-        guard.push((pos, entry.clone()));
-    }
 }
 
 /// A fresh 16-byte salt from the level's random, as upstream's
@@ -420,41 +626,67 @@ fn fresh_salt(host: &mut dyn ServerHost) -> Option<String> {
 /// backspace (the entry changed), `Some(action)` when Enter was pressed.
 fn apply_key(
     host: &mut dyn ServerHost,
-    pos: [i32; 3],
+    session: &Session,
     nbt: &mut Compound,
     key: Button,
 ) -> Option<Action> {
-    let mut entry = entry_at(pos);
+    let mut entry = entry_at(session);
     match key {
         Button::Digit(digit) => {
             entry.push(digit);
-            store_entry(pos, &entry);
+            store_entry(session, &entry);
             None
         }
         Button::Backspace => {
             entry.backspace();
-            store_entry(pos, &entry);
+            store_entry(session, &entry);
             None
         }
         Button::Submit => {
             let mode = Mode::from_int(int(nbt, KEY_MODE));
+            // The retry budget is checked on the server before any digest comparison, so a
+            // locked-out guess costs nothing (and cannot be distinguished from a wrong one).
+            let now = now_ms();
+            let allowed = {
+                let mut guard = attempts();
+                guard.entry(session.clone()).or_default().allows(now)
+            };
+            if mode == Mode::Check && !allowed {
+                entry.clear();
+                store_entry(session, &entry);
+                set_int(nbt, KEY_STATUS, STATUS_LOCKED);
+                return None;
+            }
             let salt = string(nbt, KEY_SALT).unwrap_or_default();
             let stored = string(nbt, KEY_CODE);
             let action = after_submit(mode, entry.text(), &salt, stored.as_deref());
             match action {
                 Action::Open => {
+                    {
+                        let mut guard = attempts();
+                        guard.entry(session.clone()).or_default().succeeded();
+                    }
                     entry.clear();
-                    store_entry(pos, &entry);
+                    store_entry(session, &entry);
                     set_int(nbt, KEY_STATUS, STATUS_OPENED);
                     set_int(nbt, KEY_MODE, Mode::Check.code());
                 }
                 Action::Wrong => {
+                    {
+                        let mut guard = attempts();
+                        guard.entry(session.clone()).or_default().failed(now);
+                    }
                     entry.clear();
-                    store_entry(pos, &entry);
+                    store_entry(session, &entry);
                     set_int(nbt, KEY_STATUS, STATUS_WRONG);
                 }
                 Action::Empty => {
                     set_int(nbt, KEY_STATUS, STATUS_EMPTY);
+                }
+                Action::TooShort => {
+                    entry.clear();
+                    store_entry(session, &entry);
+                    set_int(nbt, KEY_STATUS, STATUS_TOO_SHORT);
                 }
                 Action::Set => {
                     let salt = fresh_salt(host).unwrap_or_default();
@@ -462,7 +694,7 @@ fn apply_key(
                     set_string(nbt, KEY_SALT, &salt);
                     set_string(nbt, KEY_CODE, &code);
                     entry.clear();
-                    store_entry(pos, &entry);
+                    store_entry(session, &entry);
                     set_int(nbt, KEY_STATUS, STATUS_SET);
                     set_int(nbt, KEY_MODE, Mode::Check.code());
                 }
@@ -482,15 +714,55 @@ pub(crate) fn on_menu_button(host: &mut dyn ServerHost, event: &mut MenuButtonEv
     let Some(level) = in_place_level(host) else {
         return;
     };
+    // The press belongs to the player the game names, at this keypad in this dimension: never to
+    // whoever happened to type at these coordinates first.
+    let Some(session) = session_of(&*host, level, pos, event.context.player) else {
+        return;
+    };
     let Some(key) = button(event.context.id) else {
         return;
     };
     let fields = &mut *event.entity;
-    if let Some(Action::Open) = apply_key(host, pos, &mut fields.nbt, key) {
-        set_int(&mut fields.nbt, KEY_SIGNAL, DEFAULT_SIGNAL_TICKS);
-        host.set_block_property(pos, POWERED, "true");
+    match apply_key(host, &session, &mut fields.nbt, key) {
+        Some(Action::Open) => {
+            set_int(&mut fields.nbt, KEY_SIGNAL, DEFAULT_SIGNAL_TICKS);
+            host.set_block_property(pos, POWERED, "true");
+        }
+        Some(Action::Wrong) => hurt_for_wrong_code(host, &session, &fields.nbt),
+        _ => {}
     }
-    fields.data = data_slots(&*host, level, pos, &fields.nbt);
+    fields.data = data_slots(&*host, level, pos, &fields.nbt, entry_at(&session).len());
+}
+
+/// A wrong submission with the harming module installed hurts the player who made it
+/// (`IPasscodeProtected.onIncorrectPasscodeEntered`), two hearts of
+/// `securitycraft:incorrect_passcode`. Without the module nothing is hurt.
+fn hurt_for_wrong_code(host: &mut dyn ServerHost, session: &Session, nbt: &Compound) {
+    let Some(amount) = wrong_code_damage(has_module(nbt, HARMING_MODULE)) else {
+        return;
+    };
+    let Some(player) = host.player(session.player) else {
+        return;
+    };
+    let _ = player
+        .entity()
+        .hurt(host, INCORRECT_PASSCODE, amount, None, None);
+}
+
+/// The player closed a menu (ours or anyone's): every digit that player typed is gone, so a
+/// reopened keypad starts empty and no later keypress can append to an abandoned PIN.
+pub(crate) fn on_menu_closed(player: u128) {
+    clear_player(player);
+}
+
+/// The player's block menu closed (closed, out of reach, died, changed level or left): forget the
+/// session at that block, and the rest of that player's sessions as well, since only one menu can
+/// be open at a time.
+pub(crate) fn on_container_closed(player: u128, dimension: &str, pos: Option<[i32; 3]>) {
+    if let Some(pos) = pos {
+        clear_session(&Session::new(dimension, pos, player));
+    }
+    clear_player(player);
 }
 
 // --- redstone and placement ----------------------------------------------
@@ -526,6 +798,43 @@ pub(crate) fn on_state_for_placement(
         .map(Some)
 }
 
+// --- drops ----------------------------------------------------------------
+
+/// A keypad breaks: the modules installed in it drop beside it, as upstream's
+/// `IModuleInventory.dropAllModules` drops each module item. The block entity's
+/// saved data is read through `level.block_entity_data`, since the entity itself
+/// is already out of the world by now.
+pub(crate) fn on_block_drops(level: &dyn LevelHost, event: &mut BlockDropsEvent<'_>) {
+    if level.state_block(event.state) != Some(KEYPAD) {
+        return;
+    }
+    let Some(entity) = event.block_entity else {
+        return;
+    };
+    let Some(data) = level.block_entity_data(entity) else {
+        return;
+    };
+    let Some(item) = harming_module_item() else {
+        return;
+    };
+    for module in modules(&data) {
+        // The only module this slice installs; an id from a later slice has no key yet.
+        if module != HARMING_MODULE {
+            continue;
+        }
+        event.drops.push(ItemDrop::new(
+            ItemStack::of(item),
+            [
+                f64::from(event.pos.x) + 0.5,
+                f64::from(event.pos.y) + 0.5,
+                f64::from(event.pos.z) + 0.5,
+            ],
+            [0.0, 0.0, 0.0],
+            10,
+        ));
+    }
+}
+
 // --- the container and the harness commands -------------------------------
 
 /// The keypad's container: one hidden slot (no face exposes it, so no hopper
@@ -542,14 +851,23 @@ pub(crate) fn container() -> ModContainer {
 
 /// A keypad's readout and the reinforced door beside it, as `/securitycraft
 /// info` prints it.
-fn keypad_info(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Option<String> {
+fn keypad_info(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    asking: Option<u128>,
+) -> Option<String> {
     if block_at(&*host, level, pos) != KEYPAD {
         return None;
     }
     let entity = host.block_entity(level, pos)?;
     let data = entity.data(&*host)?;
     let mode = Mode::from_int(int(&data, KEY_MODE));
-    let entry = entry_at(pos);
+    // The readout shows the asking player's own buffer, never another session's.
+    let entry = asking
+        .and_then(|player| session_of(&*host, level, pos, player))
+        .map(|session| entry_at(&session))
+        .unwrap_or_default();
     let mut door = "none".to_owned();
     for at in [
         [pos[0] + 1, pos[1], pos[2]],
@@ -573,7 +891,7 @@ fn keypad_info(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Opt
         break;
     }
     Some(format!(
-        "securitycraft keypad {} {} {} code={} entered={} mode={} signal={} powered={} status={} door={door}",
+        "securitycraft keypad {} {} {} code={} entered={} mode={} signal={} powered={} status={} modules={} owner={} door={door}",
         pos[0],
         pos[1],
         pos[2],
@@ -590,6 +908,16 @@ fn keypad_info(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Opt
             "false"
         },
         int(&data, KEY_STATUS),
+        if has_module(&data, HARMING_MODULE) {
+            "harming"
+        } else {
+            "none"
+        },
+        if owner_of(&data).is_some() {
+            "set"
+        } else {
+            "none"
+        },
     ))
 }
 
@@ -603,14 +931,16 @@ fn set_code(
     code: &str,
 ) -> Result<String, String> {
     if !valid_code(code) {
-        return Err("A code is one to twenty digits.".to_owned());
+        return Err("A code is four to twenty digits.".to_owned());
     }
     if block_at(&*host, level, pos) != KEYPAD {
         return Err("No keypad at that position.".to_owned());
     }
     let salt = fresh_salt(host).ok_or_else(|| "No keypad at that position.".to_owned())?;
     let digest = hash_code(code, &salt).unwrap_or_default();
-    store_entry(pos, &Entry::new());
+    if let Some(dimension) = level.dimension().id(&*host) {
+        clear_keypad(&dimension, pos);
+    }
     let entity = host
         .block_entity(level, pos)
         .ok_or_else(|| "No keypad at that position.".to_owned())?;
@@ -623,7 +953,7 @@ fn set_code(
     set_int(&mut data, KEY_MODE, Mode::Check.code());
     set_int(&mut data, KEY_STATUS, STATUS_SET);
     set_int(&mut data, KEY_SIGNAL, 0);
-    let slots = data_slots(&*host, level, pos, &data);
+    let slots = data_slots(&*host, level, pos, &data, 0);
     entity
         .replace_data(host, data)
         .map_err(|_| "No keypad at that position.".to_owned())?;
@@ -637,6 +967,10 @@ pub(crate) fn command(
     event: &mut mod_api::RunModCommandEvent<'_>,
 ) -> Option<String> {
     let invocation = event.command;
+    let asking = match event.source {
+        mod_api::CommandSource::Player { player, .. } => Some(player.uuid()),
+        _ => None,
+    };
     let literals: Vec<&str> = invocation.literals.iter().map(String::as_str).collect();
     match literals.as_slice() {
         ["securitycraft", "info"] => {
@@ -651,7 +985,7 @@ pub(crate) fn command(
                 .into_iter()
                 .find(|level| level.dimension() == invocation.dimension)?;
             Some(
-                keypad_info(host, level, pos)
+                keypad_info(host, level, pos, asking)
                     .unwrap_or_else(|| "No keypad at that position.".to_owned()),
             )
         }
@@ -688,7 +1022,7 @@ mod tests {
 
     #[test]
     fn the_typed_digits_live_outside_the_saved_compound() {
-        let pos = [3, 64, 5];
+        let session = Session::new("minecraft:overworld", [3, 64, 5], 71);
         // What the block entity saves starts empty and stays empty: the digits a
         // player types go to the transient store only.
         let nbt = Compound::new();
@@ -696,16 +1030,54 @@ mod tests {
         for digit in [1, 2, 3, 4] {
             entry.push(digit);
         }
-        store_entry(pos, &entry);
-        assert_eq!(entry_at(pos), entry, "the screen can read what was typed");
+        store_entry(&session, &entry);
+        assert_eq!(
+            entry_at(&session),
+            entry,
+            "the screen can read what was typed"
+        );
         assert_eq!(
             string(&nbt, KEY_ENTRY),
             None,
             "a typed passcode is never written to the saved block entity"
         );
         // Enter clears it, and an empty entry is forgotten rather than stored.
-        store_entry(pos, &Entry::new());
-        assert!(entry_at(pos).is_empty());
+        store_entry(&session, &Entry::new());
+        assert!(entry_at(&session).is_empty());
+    }
+
+    #[test]
+    fn a_session_is_the_world_the_player_and_the_keypad() {
+        let a = Session::new("minecraft:overworld", [5, 64, 5], 81);
+        let b = Session::new("minecraft:overworld", [5, 64, 5], 82);
+        let c = Session::new("minecraft:the_nether", [5, 64, 5], 81);
+        let mut typed = Entry::new();
+        for digit in [1, 2, 3, 4] {
+            typed.push(digit);
+        }
+        store_entry(&a, &typed);
+        assert_eq!(entry_at(&a).text(), "1234");
+        assert!(
+            entry_at(&b).is_empty(),
+            "another player at the same keypad sees no digits"
+        );
+        assert!(
+            entry_at(&c).is_empty(),
+            "the same coordinates in another dimension are another keypad"
+        );
+
+        // Closing a menu (or leaving) drops only that player's sessions.
+        clear_player(81);
+        assert!(entry_at(&a).is_empty(), "the closed session is gone");
+        assert!(entry_at(&c).is_empty(), "the other dimension's too");
+
+        // Re-setting a keypad drops every session at it.
+        let mut other = Entry::new();
+        other.push(7);
+        store_entry(&b, &other);
+        assert_eq!(entry_at(&b).text(), "7");
+        clear_keypad("minecraft:overworld", [5, 64, 5]);
+        assert!(entry_at(&b).is_empty(), "no stale entry survives a re-set");
     }
 
     #[test]
@@ -722,18 +1094,48 @@ mod tests {
 
     #[test]
     fn two_keypads_keep_their_own_digits() {
-        let (first, second) = ([1, 64, 1], [2, 64, 2]);
+        let first = Session::new("minecraft:overworld", [1, 64, 1], 91);
+        let second = Session::new("minecraft:overworld", [2, 64, 2], 91);
         let mut one = Entry::new();
         one.push(7);
         let mut two = Entry::new();
         two.push(9);
         two.push(9);
-        store_entry(first, &one);
-        store_entry(second, &two);
-        assert_eq!(entry_at(first).text(), "7");
-        assert_eq!(entry_at(second).text(), "99");
-        store_entry(first, &Entry::new());
-        store_entry(second, &Entry::new());
+        store_entry(&first, &one);
+        store_entry(&second, &two);
+        assert_eq!(entry_at(&first).text(), "7");
+        assert_eq!(entry_at(&second).text(), "99");
+        store_entry(&first, &Entry::new());
+        store_entry(&second, &Entry::new());
+    }
+
+    #[test]
+    fn an_owner_uuid_round_trips_through_the_saved_string() {
+        let uuid = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef_u128;
+        let mut nbt = Compound::new();
+        set_string(&mut nbt, KEY_OWNER, &format!("{uuid:032x}"));
+        assert_eq!(owner_of(&nbt), Some(uuid));
+        assert_eq!(
+            string(&nbt, KEY_OWNER).as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+        // A corrupt or missing owner reads as unowned, not as a UUID that matches someone.
+        set_string(&mut nbt, KEY_OWNER, "not-a-uuid");
+        assert_eq!(owner_of(&nbt), None);
+        assert_eq!(owner_of(&Compound::new()), None);
+    }
+
+    #[test]
+    fn a_module_is_installed_once_and_read_back() {
+        let mut nbt = Compound::new();
+        assert!(!has_module(&nbt, HARMING_MODULE));
+        add_module(&mut nbt, HARMING_MODULE);
+        add_module(&mut nbt, HARMING_MODULE);
+        assert_eq!(modules(&nbt), vec![HARMING_MODULE.to_owned()]);
+        assert!(has_module(&nbt, HARMING_MODULE));
+        // A corrupt saved value is ignored rather than read as a module.
+        set_int(&mut nbt, KEY_MODULES, 1);
+        assert!(!has_module(&nbt, HARMING_MODULE));
     }
 
     #[test]

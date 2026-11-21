@@ -16,10 +16,26 @@
 
 use sha2::{Digest, Sha256};
 
+/// The shortest code a keypad accepts. A one-digit PIN is a 10-value secret: five
+/// guesses reach 50%, so the server refuses anything shorter than four digits (a
+/// review finding of 2026-11-18). Upstream's text box filters to digits but has no
+/// minimum; this port's minimum is enforced on both the set screen and the
+/// `/securitycraft code` control.
+pub const MIN_CODE_LEN: usize = 4;
+
 /// The longest entry the keypad accepts. Upstream's text box has no limit, but
 /// its legacy passcodes were at most 20 characters; beyond that typos are the
 /// only thing a longer code buys.
 pub const MAX_CODE_LEN: usize = 20;
+
+/// Failed check attempts allowed before a lockout. Five guesses against a
+/// four-digit code leave a 0.05% chance; the lockout then costs time, not guesses.
+pub const MAX_FAILED_ATTEMPTS: u32 = 5;
+
+/// How long a keypad refuses verification after [`MAX_FAILED_ATTEMPTS`] failures, in
+/// milliseconds. A per-player, per-keypad lockout (ten seconds) slows guessing without
+/// locking other players out of the same keypad.
+pub const LOCKOUT_MS: u64 = 10_000;
 
 /// The default time the keypad stays powered after a correct code
 /// (`SignalLengthOption(60)`, 60 ticks = 3 s).
@@ -38,6 +54,29 @@ pub enum Button {
     Submit,
 }
 
+/// The damage a wrong passcode deals when the keypad's harming module is installed:
+/// `ConfigHandler.SERVER.incorrectPasscodeDamage`, two hearts = 4 health points.
+pub const INCORRECT_PASSCODE_DAMAGE: f32 = 4.0;
+
+/// Whether `player` may install a module on a keypad owned by `owner`.
+///
+/// Upstream's `ModuleItem.useOn` returns `PASS` unless `IOwnable.isOwnedBy(player)`:
+/// the owner is the player who placed the block, and an unowned block (an old save,
+/// a dispenser placement) installs nothing.
+#[must_use]
+pub fn may_install(owner: Option<u128>, player: u128) -> bool {
+    owner == Some(player)
+}
+
+/// The damage a wrong submission deals, `None` without the harming module.
+///
+/// Upstream's `IPasscodeProtected.onIncorrectPasscodeEntered`: with the harming module
+/// installed a wrong code hurts the player; a keypad without it only reports the failure.
+#[must_use]
+pub fn wrong_code_damage(harming: bool) -> Option<f32> {
+    harming.then_some(INCORRECT_PASSCODE_DAMAGE)
+}
+
 /// The key a menu-button id stands for, `None` for an id the screen never
 /// sends.
 #[must_use]
@@ -50,12 +89,13 @@ pub fn button(id: i32) -> Option<Button> {
     }
 }
 
-/// Whether `code` is something a player could type: one to [`MAX_CODE_LEN`]
-/// ASCII digits. Upstream's text box filters to `\d*`, so letters never reach
-/// the server.
+/// Whether `code` is something a player could set: [`MIN_CODE_LEN`] to
+/// [`MAX_CODE_LEN`] ASCII digits. Upstream's text box filters to `\d*`, so letters
+/// never reach the server; the minimum is this port's (see [`MIN_CODE_LEN`]).
 #[must_use]
 pub fn valid_code(code: &str) -> bool {
-    !code.is_empty() && code.len() <= MAX_CODE_LEN && code.bytes().all(|byte| byte.is_ascii_digit())
+    (MIN_CODE_LEN..=MAX_CODE_LEN).contains(&code.len())
+        && code.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// The hex digest a keypad stores: SHA-256 over the salt's bytes followed by
@@ -214,6 +254,9 @@ pub enum Action {
     Set,
     /// Enter was pressed with nothing typed.
     Empty,
+    /// Enter was pressed with a code shorter than [`MIN_CODE_LEN`] (or longer than
+    /// [`MAX_CODE_LEN`]): refused before any comparison.
+    TooShort,
     /// A check on a keypad with no code becomes a set.
     Check,
 }
@@ -226,19 +269,50 @@ pub fn after_submit(mode: Mode, entry: &str, salt_hex: &str, stored: Option<&str
     if entry.is_empty() {
         return Action::Empty;
     }
+    if !valid_code(entry) {
+        return Action::TooShort;
+    }
     match mode {
-        Mode::Set => {
-            if valid_code(entry) {
-                Action::Set
-            } else {
-                Action::Empty
-            }
-        }
+        Mode::Set => Action::Set,
         Mode::Check => match submit(entry, salt_hex, stored) {
             Verdict::Correct => Action::Open,
             Verdict::Incorrect | Verdict::Empty => Action::Wrong,
             Verdict::NotSet => Action::Check,
         },
+    }
+}
+
+/// A per-keypad, per-player verification budget: [`MAX_FAILED_ATTEMPTS`] wrong
+/// codes, then a [`LOCKOUT_MS`] pause. Kept beside the session rather than in the
+/// block entity, so it is not saved and cannot be reset by reopening the screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Throttle {
+    failures: u32,
+    locked_until_ms: u64,
+}
+
+impl Throttle {
+    /// Whether this session may verify a code at `now_ms` (a monotonic clock in
+    /// milliseconds; the glue passes the system clock).
+    #[must_use]
+    pub fn allows(&self, now_ms: u64) -> bool {
+        now_ms >= self.locked_until_ms
+    }
+
+    /// Record a wrong code. The fifth failure starts a lockout; a later failure after
+    /// the lockout starts another.
+    pub fn failed(&mut self, now_ms: u64) {
+        self.failures = self.failures.saturating_add(1);
+        if self.failures >= MAX_FAILED_ATTEMPTS {
+            self.failures = 0;
+            self.locked_until_ms = now_ms.saturating_add(LOCKOUT_MS);
+        }
+    }
+
+    /// Record a correct code: the budget resets.
+    pub fn succeeded(&mut self) {
+        self.failures = 0;
+        self.locked_until_ms = 0;
     }
 }
 
@@ -294,15 +368,75 @@ mod tests {
     const OTHER_SALT: &str = "ffeeddccbbaa99887766554433221100";
 
     #[test]
-    fn a_code_is_one_to_twenty_ascii_digits() {
+    fn a_code_is_four_to_twenty_ascii_digits() {
         assert!(valid_code("1234"));
-        assert!(valid_code("0"));
+        assert!(valid_code("0123"));
         assert!(valid_code(&"9".repeat(MAX_CODE_LEN)));
         assert!(!valid_code(""));
+        assert!(!valid_code("0"), "a one-digit code is a ten-value secret");
+        assert!(!valid_code("123"), "three digits are still too few");
         assert!(!valid_code(&"9".repeat(MAX_CODE_LEN + 1)));
         assert!(!valid_code("12a4"));
         assert!(!valid_code("12 4"));
         assert!(!valid_code("-123"));
+    }
+
+    #[test]
+    fn a_too_short_code_is_refused_before_any_comparison() {
+        let stored = hash_code("1234", SALT).unwrap();
+        for short in ["1", "12", "123"] {
+            assert_eq!(
+                after_submit(Mode::Set, short, SALT, None),
+                Action::TooShort,
+                "set mode must refuse {short}"
+            );
+            assert_eq!(
+                after_submit(Mode::Check, short, SALT, Some(&stored)),
+                Action::TooShort,
+                "check mode must refuse {short} without looking at the digest"
+            );
+        }
+    }
+
+    #[test]
+    fn five_wrong_codes_lock_the_session_out_for_ten_seconds() {
+        let mut throttle = Throttle::default();
+        assert!(throttle.allows(0));
+        for attempt in 0..MAX_FAILED_ATTEMPTS {
+            assert!(
+                throttle.allows(u64::from(attempt)),
+                "attempt {attempt} is allowed"
+            );
+            throttle.failed(u64::from(attempt));
+        }
+        let locked_at = u64::from(MAX_FAILED_ATTEMPTS - 1);
+        assert!(!throttle.allows(locked_at + 1), "the budget is spent");
+        assert!(!throttle.allows(locked_at + LOCKOUT_MS - 1));
+        assert!(
+            throttle.allows(locked_at + LOCKOUT_MS),
+            "the pause ends after LOCKOUT_MS"
+        );
+        // The next five failures after the pause start another lockout.
+        for _ in 0..MAX_FAILED_ATTEMPTS {
+            throttle.failed(locked_at + LOCKOUT_MS);
+        }
+        assert!(!throttle.allows(locked_at + LOCKOUT_MS + 1));
+    }
+
+    #[test]
+    fn a_correct_code_clears_the_budget() {
+        let mut throttle = Throttle::default();
+        for _ in 0..MAX_FAILED_ATTEMPTS - 1 {
+            throttle.failed(0);
+        }
+        throttle.succeeded();
+        for attempt in 0..MAX_FAILED_ATTEMPTS - 1 {
+            throttle.failed(u64::from(attempt));
+        }
+        assert!(
+            throttle.allows(100),
+            "four failures after a success do not lock"
+        );
     }
 
     #[test]
@@ -469,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn set_mode_stores_any_valid_code() {
+    fn set_mode_stores_a_valid_code() {
         assert_eq!(after_submit(Mode::Set, "2468", SALT, None), Action::Set);
     }
 
@@ -514,5 +648,36 @@ mod tests {
     fn a_salt_round_trips_through_the_saved_hex() {
         let bytes = [0x00, 0x0f, 0xa5, 0xff];
         assert_eq!(new_salt(&bytes), "000fa5ff");
+    }
+
+    #[test]
+    fn a_harming_module_damages_a_wrong_code() {
+        assert_eq!(
+            wrong_code_damage(true),
+            Some(4.0),
+            "two hearts, as upstream's incorrectPasscodeDamage default"
+        );
+        assert_eq!(
+            wrong_code_damage(false),
+            None,
+            "a keypad without the module only reports the failure"
+        );
+    }
+
+    #[test]
+    fn only_the_keypad_owner_may_install_a_module() {
+        let owner = Some(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef_u128);
+        assert!(may_install(
+            owner,
+            0x0123_4567_89ab_cdef_0123_4567_89ab_cdef
+        ));
+        assert!(
+            !may_install(owner, 0xdead_beef_dead_beef_dead_beef_dead_beef),
+            "a stranger installs nothing"
+        );
+        assert!(
+            !may_install(None, 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef),
+            "an unowned keypad (old save, dispenser) installs nothing"
+        );
     }
 }

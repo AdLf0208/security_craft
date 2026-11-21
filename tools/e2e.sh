@@ -3,11 +3,9 @@
 # behaviour oracle. The port is now one flat SDK package (`securitycraft.hmod` at the port root,
 # compiled into the game by the launcher), so the game this script drives must be a
 # **launcher-built** one (`horizon-launcher native-build . --instance <instance>
-# --trust-native-code`); `GAME=` points at it. It has NOT been re-run since the migration: no
-# launcher and no game build at SDK `0b14f8a` exist on this box (see `notes.md`, trap 9). The
-# `EMBEDDED=*` legs are retired with the embedded-content helper (the package carries `assets/`
-# and `data/` itself); the default leg loads the package with `--dev-mod` where the launcher-built
-# game has none of its own.
+# --trust-native-code`); `GAME=` points at it. The package carries the blocks, the code and the
+# assets in one file, so the game is built against it and there is no `--dev-mod` leg. The
+# `EMBEDDED=*` legs are retired with the embedded-content helper.
 #
 # In-game check for SecurityCraft slice 1: the keypad and the reinforced door.
 #
@@ -34,20 +32,18 @@
 #     nothing typed stores nothing (`code=none`, `status=4`).
 #  8. WRONG BLOCK: an empty-hand click on the reinforced door opens no menu and
 #     leaves it closed; so does a vanilla iron door (the control).
+#  9. RECIPE: seven iron, paper and an arrow craft the harming module at a
+#     crafting table; the grid is emptied (the ingredients are consumed).
+# 10. OWNER + MODULE: the placer is the keypad's owner; the owner installs the
+#     module; a wrong code takes two hearts and a right code none.
+# 11. DROPS: breaking the keypad in survival with a pickaxe drops the module.
+# 12. DIFFERENTIAL: a keypad without the module does not hurt a wrong code.
 #
 #   tools/e2e.sh               # the scenario above
 #   SELFTEST=1 tools/e2e.sh    # phase 4 expects the door CLOSED: must exit 1
-#   DEV_MOD=path/to/x.hmod tools/e2e.sh   # load a different content mod
+#   SELFTEST=harming tools/e2e.sh  # phase 12 expects the missing damage: exit 1
 #   CONTROL=1 tools/e2e.sh     # no package at all: the ids must be unknown
-#
-# The single-file deliverable (the AE2 pattern, `mixins/securitycraft/data/…`):
-#   EMBEDDED=1 tools/e2e.sh    # launch with **no** `--dev-mod`: the built game
-#                              # carries the bundle's own content; the run also
-#                              # checks the file the helper wrote is byte-identical
-#                              # to `content/securitycraft.hmod`
-#   EMBEDDED=1 CONTROL=1 tools/e2e.sh     # the same build with `.horizon-cache`
-#                              # unusable: the ids must be unknown (CONTROL
-#                              # defaults to EMBEDDED for exactly this leg)
+#   GAME=<an unmodified game> tools/e2e.sh   # the differential: the first phase fails
 #
 # Harness notes:
 #  * the keypad screen has no visible slots, so the panel's origin comes from
@@ -64,13 +60,7 @@ GAME=${GAME:-$PORT/target/horizon-cargo/fast/horizon-client}
 RES=${RES:-${HORIZON_RES:-/home/adlf/Desktop/horizon/.local/horizon-client/26.3}}
 SOCK=${SOCK:-/tmp/opencode/securitycraft-e2e.sock}
 SELFTEST=${SELFTEST:-0}
-# The package to load with `--dev-mod` (the game is launcher-built, so it carries no copy).
-DEV_MOD=${DEV_MOD:-$PORT/securitycraft.hmod}
-# EMBEDDED=1: launch with no `--dev-mod`; the built game carries the bundle's own content.
-EMBEDDED=${EMBEDDED:-0}
-# CONTROL=1: prove the mod's ids are unknown. With EMBEDDED=1 that means the same build with
-# the embedded content made unavailable (`.horizon-cache` a plain file), so the run proves the
-# content came from the embedded copy; without it, no package at all is loaded.
+# CONTROL=1: prove the mod's ids are unknown on a game without the package.
 CONTROL=${CONTROL:-0}
 LOG=${LOG:-$CLONE/ports/_shared/evidence/securitycraft/e2e.log}
 
@@ -109,6 +99,22 @@ door_open() { block_state "$1" "$2" "$3" | sed -n 's/.*open=\(true\|false\).*/\1
 info() { ctl chat "/securitycraft info $1 $2 $3" >/dev/null; ctl wait 6 >/dev/null; ctl messages 8 | jq -r '.chat[]' | grep -m1 '^securitycraft keypad ' || true; }
 field() { sed -n "s/.*[ ]$1=\([^ ]*\).*/\1/p" <<<"$2"; }
 code_cmd() { ctl chat "/securitycraft code $1 $2 $3 $4" >/dev/null; ctl wait 4 >/dev/null; }
+# A slot of the open menu by the item it holds (`ctl screen`'s own numbering).
+inv_slot_of() { ctl screen | jq -r --arg i "$1" '[.slots[]? | select(.slot < 36 and .item == $i) | .slot] | first // ""'; }
+# One item of ITEM from its inventory slot into the crafting grid CELL (a right
+# click places one, the second left click puts the rest back).
+grid_put_one() {
+    local src
+    src=$(inv_slot_of "$1")
+    [ -n "$src" ] || fail "no $1 in the inventory for the recipe"
+    ctl click-slot "$src" >/dev/null || fail "cannot pick up $1"
+    ctl wait 2 >/dev/null
+    ctl click-slot "$2" right >/dev/null || fail "cannot place $1 in grid cell $2"
+    ctl wait 2 >/dev/null
+    ctl click-slot "$src" >/dev/null || fail "cannot put the rest of $1 back"
+    ctl wait 2 >/dev/null
+}
+health() { ctl state | jq -r '.player.health'; }
 
 # The keypad panel's top-left in GUI pixels, from the open screen's size.
 panel_origin() {
@@ -159,19 +165,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# How the content half reaches the game: the `--dev-mod` content folder by default; with
-# EMBEDDED=1 the built game carries the bundle's own copy (`mixins/<id>/data/…`, the AE2
-# pattern) and is launched with no `--dev-mod`, as an installed `.hnmod` would be.
-launch() { # launch WORLD
+# The package is compiled into the game the launcher built; no `--dev-mod`.
+launch() { # launch WORLD [GAME]
     rm -f "$SOCK"
-    local args=(--game "$GAME" --world "$1" --seed 20261105 --creative --offscreen --wait
-                --game-dir "$SCRATCH/game" --resources "$RES")
-    if [ "$EMBEDDED" = 1 ]; then
-        echo "  launch: no --dev-mod; the bundle carries its own content" >&2
-    else
-        args+=(--dev-mod "$DEV_MOD")
-    fi
-    "$CTL" --socket "$SOCK" launch "${args[@]}"
+    local game=${2:-$GAME}
+    echo "  launch: $(basename "$game"), no --dev-mod: the package carries its content" >&2
+    "$CTL" --socket "$SOCK" launch \
+        --game "$game" --world "$1" --seed 20261105 --creative --offscreen --wait \
+        --game-dir "$SCRATCH/game" --resources "$RES"
     ctl wait-ready 180
     if grep -q "content mods not loaded" "${SOCK}.log" 2>/dev/null; then
         grep "content mods not loaded" "${SOCK}.log" >&2
@@ -188,6 +189,11 @@ ids_unknown() {
         fail "the game gave an item from a package it did not load: $reply"
     fi
     echo "give: $reply"
+    say "control: the module item id is unknown"
+    if reply=$(ctl give securitycraft:harming_module 1 2>&1); then
+        fail "the game gave the module from a package it did not load: $reply"
+    fi
+    echo "give module: $reply"
     px=$(ctl state | jq -r '.player.position[0]' | cut -d. -f1)
     pz=$(ctl state | jq -r '.player.position[2]' | cut -d. -f1)
     px=$((px + 2)); pz=$((pz + 2))
@@ -210,50 +216,16 @@ ids_unknown() {
     echo "chat: $(grep -i 'securitycraft' <<<"$msgs" | head -1 || echo 'no /securitycraft reply')"
 }
 
-# EMBEDDED=1 CONTROL=1: the same built game (every hook is in it) with the embedded content
-# made unavailable — `.horizon-cache` in the game folder is a plain file, so the helper can
-# neither compare nor write its content and falls back to Continue. If the ids resolve here,
-# the embedded file proves nothing.
-embedded_control_leg() {
-    say "control: the same build with no embedded content file"
-    rm -rf "$GAME_HOME/.horizon-cache"
-    mkdir -p "$GAME_HOME"
-    : > "$GAME_HOME/.horizon-cache"
-    launch SecurityCraftEmbeddedControl
-    ids_unknown
-    [ -f "$GAME_HOME/.horizon-cache" ] \
-        || fail "the control's .horizon-cache was replaced: the helper wrote its content"
-    [ ! -d "$GAME_HOME/.horizon-cache" ] \
-        || fail "the helper created a .horizon-cache directory in the control run"
-    echo "  without the embedded file: no keypad item, the keypad block is unknown"
-    ctl quit >/dev/null 2>&1 || true
-    rm -f "$GAME_HOME/.horizon-cache"
-}
-
-# EMBEDDED=1: the bundle must have written its content out at startup, byte for byte the
-# delivered content mod.
-embedded_content_check() {
-    local cache=$GAME_HOME/.horizon-cache/securitycraft-embedded-content.hmod
-    [ -f "$cache" ] || fail "the bundle did not write its embedded content to $cache"
-    cmp -s "$cache" "$PORT/content/securitycraft.hmod" \
-        || fail "the embedded content differs from content/securitycraft.hmod"
-    echo "  embedded content: $(wc -c < "$cache" | tr -d ' ') B at $cache, identical to content/securitycraft.hmod"
-}
-
-say "launch (offscreen renderer, creative, content + native bundle)"
+say "launch (offscreen renderer, creative, the package compiled into the game)"
 if [ "$CONTROL" = 1 ]; then
-    if [ "$EMBEDDED" = 1 ]; then
-        embedded_control_leg
-    else
-        say "control: no package is loaded"
-        launch SecurityCraftE2E
-        ids_unknown
-        echo "PASS: without the package the game does not know securitycraft:keypad_item or securitycraft:keypad, setblock refuses the block, no keypad exists at the target and /securitycraft answers nothing"
-        exit 0
-    fi
+    say "control: no package is loaded"
+    [ -x "${CONTROL_GAME:-}" ] || fail "CONTROL=1 needs CONTROL_GAME=<an unmodified client>"
+    launch SecurityCraftE2E "$CONTROL_GAME"
+    ids_unknown
+    echo "PASS: without the package the game does not know securitycraft:keypad_item or securitycraft:keypad, setblock refuses the block, no keypad exists at the target and /securitycraft answers nothing"
+    exit 0
 fi
 launch SecurityCraftE2E
-if [ "$EMBEDDED" = 1 ]; then embedded_content_check; fi
 
 say "an Overworld platform at y=100, away from the terrain"
 PX=$(ctl state | jq -r '.player.position[0]' | cut -d. -f1)
@@ -290,8 +262,14 @@ ctl wait 4
 block_name "$KEY_X" "$KEY_Y" "$KEY_Z" | grep -qx "$KEYPAD" || fail "no keypad at $KEY_X,$KEY_Y,$KEY_Z"
 echo "keypad: $(block_state "$KEY_X" "$KEY_Y" "$KEY_Z")"
 
-say "phase 2: a fresh keypad opens in set mode; 1 2 3 4 + OK stores a code"
+say "phase 2: a fresh keypad opens in set mode; a three-digit code is refused, 1 2 3 4 + OK stores one"
 open_screen "$KEY_X" "$KEY_Y" "$KEY_Z"
+type_code 123
+press_submit
+line=$(info "$KEY_X" "$KEY_Y" "$KEY_Z")
+echo "after a three-digit set: $line"
+[ "$(field status "$line")" = 5 ] || fail "a three-digit set was not refused: $line"
+[ "$(field code "$line")" = none ] || fail "a three-digit code was stored: $line"
 type_code 1234
 press_submit
 line=$(info "$KEY_X" "$KEY_Y" "$KEY_Z")
@@ -319,6 +297,30 @@ if [ "$SELFTEST" = 1 ]; then
     [ "$(door_open "$DOOR_X" 101 "$DOOR_Z")" = true ] \
         || fail "SELFTEST: expected the door OPEN after a wrong code"
 fi
+
+say "phase 3b: a closed screen starts empty, and five wrong codes rate-limit the session"
+open_screen "$KEY_X" "$KEY_Y" "$KEY_Z"
+type_code 12
+ctl close >/dev/null 2>&1 || true
+ctl wait 4
+open_screen "$KEY_X" "$KEY_Y" "$KEY_Z"
+line=$(info "$KEY_X" "$KEY_Y" "$KEY_Z")
+echo "after reopening: $line"
+[ -z "$(field entered "$line")" ] || fail "digits survived the screen close: $line"
+# Phase 3 spent one failure; four more reach the five-attempt budget.
+for _ in 1 2 3 4; do
+    type_code 9999
+    press_submit
+done
+type_code 1234
+press_submit
+line=$(info "$KEY_X" "$KEY_Y" "$KEY_Z")
+echo "right code while locked out: $line"
+[ "$(field status "$line")" = 6 ] || fail "the right code was not rate-limited: $line"
+[ "$(field powered "$line")" = false ] || fail "a locked-out attempt powered the keypad: $line"
+[ "$(door_open "$DOOR_X" 101 "$DOOR_Z")" = false ] || fail "a locked-out attempt opened the door"
+ctl close >/dev/null 2>&1 || true
+ctl wait 220
 
 say "phase 4: the right code powers the keypad and opens the adjacent reinforced door"
 open_screen "$KEY_X" "$KEY_Y" "$KEY_Z"
@@ -393,5 +395,166 @@ ctl wait 4
 [ "$(door_open "$DOOR_X" 101 "$DOOR_Z")" = false ] || fail "a hand click opened the reinforced door"
 ctl close >/dev/null 2>&1 || true
 
-echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything; a wrong code left the reinforced door closed; the right code powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door"
+say "phase 9: the harming module's recipe crafts it from seven iron, paper and an arrow"
+ctl close >/dev/null 2>&1 || true
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl wait 2
+ctl give minecraft:crafting_table 1 >/dev/null
+ctl give minecraft:iron_ingot 7 >/dev/null
+ctl give minecraft:paper 1 >/dev/null
+ctl give minecraft:arrow 1 >/dev/null
+ctl wait 6
+TABLE_X=$((PX-4)); TABLE_Z=$((PZ-4))
+ctl tp "$(( TABLE_X + 1 )).5" 101 "$(( TABLE_Z + 2 )).5" >/dev/null
+ctl wait 6
+ctl look 180 0
+ctl select minecraft:crafting_table >/dev/null
+ctl place "$TABLE_X" 101 "$TABLE_Z" >/dev/null || fail "the crafting table did not place"
+ctl wait 4
+block_name "$TABLE_X" 101 "$TABLE_Z" | grep -qx minecraft:crafting_table || fail "no crafting table at $TABLE_X,101,$TABLE_Z"
+open_screen_table() {
+    ctl close >/dev/null 2>&1 || true
+    ctl tp "$(( $1 + 1 )).5" 101 "$(( $2 + 2 )).5" >/dev/null
+    ctl wait 6
+    ctl look 180 0
+    ctl wait 2
+    ctl look-at block "$1" 101 "$2" south >/dev/null 2>&1 || true
+    ctl interact "$1" 101 "$2" south >/dev/null || fail "the crafting table did not take the right click"
+    ctl wait 6
+    # The crafting table reports `inventory` in this build; its grid is slots 100..108 and
+    # the result 200 (the harness's slot numbering, as rftoolsstorage's e2e records).
+    local screen grid
+    screen=$(ctl screen | jq -r '.screen')
+    grid=$(ctl screen | jq '[.slots[]? | select(.slot >= 100)] | length')
+    [ "$grid" = 10 ] || fail "the crafting table grid did not open (screen=$screen, $grid grid slots)"
+}
+open_screen_table "$TABLE_X" "$TABLE_Z"
+# The grid is 100..108 (row-major) and the result 200. Pattern: III / IPI / ISI.
+for cell in 100 101 102 103 105 106 108; do grid_put_one minecraft:iron_ingot "$cell"; done
+grid_put_one minecraft:paper 104
+grid_put_one minecraft:arrow 107
+ctl wait 4
+result=$(ctl screen | jq -r '[.slots[]? | select(.slot == 200) | .item][0] // "empty"')
+echo "recipe result: $result"
+[ "$result" = securitycraft:harming_module ] || fail "the harming module recipe produced '$result'"
+ctl click-slot 200 shift >/dev/null || fail "cannot take the crafted module"
+ctl wait 4
+left=$(ctl screen | jq -r '[.slots[]? | select(.slot >= 100 and .slot <= 108 and .item != null)] | length')
+echo "grid slots still holding an item: $left"
+[ "$left" = 0 ] || fail "the recipe did not consume its ingredients ($left grid slots filled)"
+held=$(inv_slot_of securitycraft:harming_module)
+echo "module in inventory slot: ${held:-none}"
+[ -n "$held" ] || fail "the crafted module is not in the inventory"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4
+
+say "phase 10: the owner installs the module; a wrong code hurts, a right code does not"
+MODULE_X=$((PX-4)); MODULE_Y=101; MODULE_Z=$((PZ+4))
+ctl tp "$(( MODULE_X + 1 )).5" 101 "$(( MODULE_Z + 2 )).5" >/dev/null
+ctl wait 6
+ctl look 180 0
+ctl give securitycraft:keypad_item 1 >/dev/null
+ctl wait 4
+ctl select securitycraft:keypad_item >/dev/null
+ctl place "$MODULE_X" "$MODULE_Y" "$MODULE_Z" >/dev/null || fail "the module keypad did not place"
+ctl wait 4
+line=$(info "$MODULE_X" "$MODULE_Y" "$MODULE_Z")
+echo "fresh module keypad: $line"
+[ "$(field owner "$line")" = set ] || fail "the placer did not become the keypad's owner: $line"
+[ "$(field modules "$line")" = none ] || fail "a fresh keypad already has a module: $line"
+code_cmd "$MODULE_X" "$MODULE_Y" "$MODULE_Z" 1234
+ctl select securitycraft:harming_module >/dev/null
+ctl tp "$(( MODULE_X + 1 )).5" 101 "$(( MODULE_Z + 2 )).5" >/dev/null
+ctl wait 4
+ctl look 180 0
+ctl look-at block "$MODULE_X" "$MODULE_Y" "$MODULE_Z" south >/dev/null 2>&1 || true
+ctl interact "$MODULE_X" "$MODULE_Y" "$MODULE_Z" south >/dev/null || fail "the keypad did not take the module"
+ctl wait 6
+line=$(info "$MODULE_X" "$MODULE_Y" "$MODULE_Z")
+echo "after installing the module: $line"
+[ "$(field modules "$line")" = harming ] || fail "the harming module was not installed: $line"
+[ "$(field code "$line")" = set ] || fail "installing the module lost the code: $line"
+# Creative keeps the module (upstream's `!isCreative()` guard), so it is still carried.
+carried=$(ctl inventory | jq -r '.counts["securitycraft:harming_module"] // 0')
+echo "module still carried after a creative install: $carried"
+[ "$carried" -ge 1 ] || fail "the creative install consumed the module"
+# Survival so the damage is taken (a creative player is invulnerable to it).
+ctl command "gamemode survival @s" >/dev/null
+ctl wait 4
+before=$(health)
+open_screen "$MODULE_X" "$MODULE_Y" "$MODULE_Z"
+type_code 9999
+press_submit
+# Read health before anything waits: full food regenerates a point every 10 ticks.
+after=$(health)
+line=$(info "$MODULE_X" "$MODULE_Y" "$MODULE_Z")
+echo "wrong code with the harming module: $line health $before -> $after"
+[ "$(field status "$line")" = 1 ] || fail "the wrong code was not refused: $line"
+awk -v b="$before" -v a="$after" 'BEGIN { exit !(b - a >= 3.99) }' \
+    || fail "the harming module did not take two hearts ($before -> $after)"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4
+before=$(health)
+open_screen "$MODULE_X" "$MODULE_Y" "$MODULE_Z"
+type_code 1234
+press_submit
+line=$(info "$MODULE_X" "$MODULE_Y" "$MODULE_Z")
+after=$(health)
+echo "right code with the harming module: $line health $before -> $after"
+[ "$(field powered "$line")" = true ] || fail "the right code did not power the keypad: $line"
+awk -v b="$before" -v a="$after" 'BEGIN { exit !(a >= b) }' \
+    || fail "a right code was hurt ($before -> $after)"
+ctl close >/dev/null 2>&1 || true
+ctl command "gamemode creative @s" >/dev/null
+ctl wait 4
+
+say "phase 11: breaking the keypad drops the installed module"
+# Survival with the right tool: a creative break drops nothing, and the keypad
+# `requires_tool`, so a bare hand would drop nothing either.
+ctl command "gamemode survival @s" >/dev/null
+ctl give minecraft:diamond_pickaxe 1 >/dev/null
+ctl select minecraft:diamond_pickaxe >/dev/null
+ctl wait 6
+echo "breaking as $(ctl state | jq -r '.gamemode') with $(ctl inventory | jq -r '.held.item // "nothing"')"
+broken=$(ctl break "$MODULE_X" "$MODULE_Y" "$MODULE_Z" --timeout 40)
+echo "break: $(echo "$broken" | jq -c '{block, drops}')"
+[ "$(echo "$broken" | jq -r '.block')" = "minecraft:air" ] || fail "the module keypad did not break"
+[ "$(echo "$broken" | jq -r '.drops["securitycraft:harming_module"] // 0')" -ge 1 ] \
+    || fail "the installed harming module did not drop"
+
+say "phase 12 (differential): a keypad without the module does not hurt a wrong code"
+DIFF_X=$((PX-4)); DIFF_Y=101; DIFF_Z=$PZ
+ctl tp "$(( DIFF_X + 1 )).5" 101 "$(( DIFF_Z + 2 )).5" >/dev/null
+ctl wait 6
+ctl look 180 0
+ctl give securitycraft:keypad_item 1 >/dev/null
+ctl wait 4
+ctl select securitycraft:keypad_item >/dev/null
+ctl place "$DIFF_X" "$DIFF_Y" "$DIFF_Z" >/dev/null || fail "the differential keypad did not place"
+ctl wait 4
+code_cmd "$DIFF_X" "$DIFF_Y" "$DIFF_Z" 1234
+ctl command "gamemode survival @s" >/dev/null
+ctl wait 4
+before=$(health)
+open_screen "$DIFF_X" "$DIFF_Y" "$DIFF_Z"
+type_code 9999
+press_submit
+after=$(health)
+line=$(info "$DIFF_X" "$DIFF_Y" "$DIFF_Z")
+echo "wrong code without the module: $line health $before -> $after"
+[ "$(field modules "$line")" = none ] || fail "the differential keypad has a module: $line"
+[ "$(field status "$line")" = 1 ] || fail "the wrong code was not refused: $line"
+awk -v b="$before" -v a="$after" 'BEGIN { exit !(a >= b) }' \
+    || fail "a keypad without the harming module hurt the player ($before -> $after)"
+if [ "$SELFTEST" = harming ]; then
+    # Fail-capability: the differential expects the damage that must NOT happen.
+    awk -v b="$before" -v a="$after" 'BEGIN { exit !(b - a >= 3.99) }' \
+        || fail "SELFTEST: expected a keypad without the module to hurt the player"
+fi
+ctl close >/dev/null 2>&1 || true
+ctl command "gamemode creative @s" >/dev/null
+ctl wait 4
+
+echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes rate-limited a correct one; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke; a keypad without the module did not hurt a wrong code"
 # The cleanup trap prints the run's exit status as the last line.

@@ -1,24 +1,26 @@
-//! SecurityCraft for Horizon: the keypad and the reinforced door (slice 1).
+//! SecurityCraft for Horizon: the keypad, the reinforced door and the harming module.
 //!
 //! The rules — the code's shape, the salted digest, the verdict of a submitted entry, the
-//! screen mode, the key-to-button map and the signal countdown — live in [`runtime`], which
-//! knows nothing about the game and carries its own tests, copied byte for byte from the
-//! retired `.hnmod` bundle. [`support`] is the game glue, and this file is the one
-//! `impl Hooks`: the keypad's [Parts](mod_api::BlockEntityPart), its registration, and the
-//! `/securitycraft` harness commands.
+//! screen mode, the key-to-button map, the signal countdown, who may install a module and the
+//! damage a wrong code deals — live in [`runtime`], which knows nothing about the game and
+//! carries its own tests. [`support`] is the game glue, and this file is the one
+//! `impl Hooks`: the keypad's [Parts](mod_api::BlockEntityPart), the key panel item's part,
+//! the module drop, and the `/securitycraft` harness commands.
 //!
 //! A keypad is a mod block entity with a menu; a reinforced door beside it is carried content
 //! (a vanilla iron door) that opens on the keypad's redstone signal and closes when the signal
-//! runs out.
+//! runs out. The player who places the keypad owns it, and the owner may install the harming
+//! module, which hurts a player who enters a wrong code.
 pub mod runtime;
 mod support;
 
 use mod_api::{
-    self, BlockEntityEvent, BlockEntityPart, BlockEntityTickEvent, BlockEntityTicksEvent,
-    BlockPart, Flow, Hooks, InteractionResult, IsSignalSourceEvent, LevelHost, LevelSide,
-    MenuButtonEvent, RegisterCommandsEvent, Registrar, RegistrationContext, RunModCommandEvent,
-    Screen, ScreenClickEvent, ScreenDrawEvent, ServerHost, StateForPlacementEvent, UseItemOnEvent,
-    UseWithoutItemEvent,
+    self, BlockDropsEvent, BlockEntityEvent, BlockEntityPart, BlockEntityTickEvent,
+    BlockEntityTicksEvent, BlockPart, Flow, Hooks, InteractionResult, IsSignalSourceEvent,
+    ItemPart, LevelHost, LevelSide, MenuButtonEvent, MenuClosedEvent, OnBlockPlacedByEvent,
+    PlayerContainerCloseEvent, RegisterCommandsEvent, Registrar, RegistrationContext,
+    RunModCommandEvent, Screen, ScreenClickEvent, ScreenDrawEvent, ServerHost,
+    StateForPlacementEvent, UseItemOnEvent, UseWithoutItemEvent,
 };
 
 /// The keypad: its block entity (screen, menu, signal) and its block (placement, redstone).
@@ -114,6 +116,18 @@ impl BlockEntityPart for Keypad {
     }
 }
 
+/// The key panel item: placing it makes the player who placed it the keypad's owner.
+struct KeyPanel;
+
+#[mod_api::horizon_part]
+impl ItemPart for KeyPanel {
+    /// `BlockItemExtension.onBlockPlacedBy`: the placer becomes the keypad's owner, and the
+    /// owner is who may install modules on it (`on_use`) and open a fresh keypad's set screen.
+    fn on_block_placed_by(&self, host: &mut dyn ServerHost, event: &mut OnBlockPlacedByEvent<'_>) {
+        support::on_block_placed_by(host, event);
+    }
+}
+
 #[derive(Default)]
 struct Mod;
 
@@ -137,6 +151,19 @@ impl Hooks for Mod {
             return;
         }
         r.block_container(&block, support::container());
+        // Bound first: `r.item_part(r.item_key(…), …)` borrows `r` twice.
+        let item = r.item_key(support::KEYPAD_ITEM);
+        r.item_part(item, KeyPanel);
+        // `block_drops` only has a `LevelHost`, which cannot resolve an id, so the
+        // harming module's key is stored once here.
+        let harming_module = r.item_key(support::HARMING_MODULE);
+        support::set_harming_module_item(harming_module);
+    }
+
+    /// A keypad breaks: its installed modules drop beside it (`dropAllModules`).
+    fn block_drops(&self, level: &dyn LevelHost, event: &mut BlockDropsEvent<'_>) -> Flow {
+        support::on_block_drops(level, event);
+        Flow::Continue
     }
 
     /// `/securitycraft info|code`: the harness controls this slice's e2e needs (a headless
@@ -149,6 +176,23 @@ impl Hooks for Mod {
             "securitycraft code <pos:block_pos> <code:word>",
             2,
         ));
+    }
+
+    /// A menu a mod opened closed, or its player left: every digit that player typed is gone.
+    fn menu_closed(&self, _host: &mut dyn ServerHost, event: &mut MenuClosedEvent) {
+        support::on_menu_closed(event.uuid);
+    }
+
+    /// The player's block menu closed (closed, out of reach, died, changed level or left): the
+    /// keypad session at that block is forgotten as well.
+    fn player_container_close(
+        &self,
+        _host: &mut dyn ServerHost,
+        event: &mut PlayerContainerCloseEvent<'_>,
+    ) {
+        if event.menu == support::KEYPAD_MENU {
+            support::on_container_closed(event.player, event.dimension, event.pos);
+        }
     }
 
     /// Runs a `/securitycraft` usage and reports its one line.

@@ -3,6 +3,7 @@
   "icon": "securitycraft:keypad_item",
   "items": [
     "securitycraft:keypad_item",
-    "securitycraft:iron_door_reinforced"
+    "securitycraft:iron_door_reinforced",
+    "securitycraft:harming_module"
   ]
 }

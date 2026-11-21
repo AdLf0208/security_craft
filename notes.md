@@ -666,3 +666,196 @@ Every step ran in a `ports/tools/build-slot.sh` lease with `CARGO_INCREMENTAL=0`
 > half now ships inside the package (`assets/`, `data/`), so the embedded-content cache write is
 > gone, with one field renamed by the schema (`place_block` → `block`); `runtime.rs` and its tests
 > are byte-identical. Version 0.2.0.
+
+## Review fixes (2026-11-18, PR #1197)
+
+Two findings on the keypad:
+
+1. **Plaintext PIN input was shared by XYZ alone.** The button handler ignored the acting player
+   and closing a menu left the buffer behind, so another session at the same keypad, or a keypad
+   at the same coordinates in another dimension, could modify or submit someone else's digits.
+   **Fix:** every buffer is keyed by `Session { dimension, pos, player }`; the digits are cleared
+   when the screen is opened (`on_use`), when a menu closes (`menu_closed`), when the block menu
+   closes for any reason (`player_container_close`), and when the code command re-sets the keypad
+   (`clear_keypad`). `data_slots`/`keypad_info` read only the acting player's session.
+2. **No retry limit, and PINs as short as one digit.** **Fix:** `MIN_CODE_LEN = 4` in
+   `valid_code` (both the set screen and `/securitycraft code`; a too-short submit is
+   `Action::TooShort`, status 5), and a server-side `Throttle` per session: five wrong codes start
+   a 10-second lockout (status 6) checked before any digest comparison, with a correct code
+   resetting it. The budget deliberately outlives a screen close.
+
+**Tests.** `a_session_is_the_world_the_player_and_the_keypad`,
+`a_too_short_code_is_refused_before_any_comparison`,
+`five_wrong_codes_lock_the_session_out_for_ten_seconds`, `a_correct_code_clears_the_budget`, and the
+updated `a_code_is_four_to_twenty_ascii_digits`.
+
+**In-game.** Phase 2 refuses a three-digit set (status 5); phase 3b types `12`, closes, reopens and
+reads `entered=` empty; five wrong codes then make the right one status 6 (door closed); after the
+lockout the right code powers the keypad and opens the door. Evidence:
+`../_shared/evidence/securitycraft-e2e/e2e-launcher.log` (`PASS` + `EXIT:0`) and
+`e2e-launcher-control.log` (`EXIT:1`); checker green.
+
+**Runtime file.** `src/runtime.rs` now carries these new rules (minimum, `Action::TooShort`,
+`Throttle`) on top of the retired bundle's byte-identical copy; its new sha256 is
+`8f78aba553247a123cac17888e593b81c52c84c230d0f95de010c0b97ecb03f3`. The retired file's sha
+(`1b2744a9…`) records the pre-review provenance.
+
+**Package.** `securitycraft.hmod`, **0.2.1**, 45,092 B, sha256
+`9bb21d4c189066b6b1720f8df235b3056e0d0047586b59f260a04c0aed490830`; two builds byte-identical,
+`check` and `fits --build 0b14f8a` exit 0.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port, rust-review
+
+## Slice 3 — the harming module (2026-11-21, SDK `0a875da`)
+
+**Slice.** The gap line this job comes from is the port's own list: *"Owner/allowlist/denylist;
+the smart and harming modules; the disguise module; the `disabled` option; …"*. From it this slice
+takes **the harming module**, and the owner it needs to install one. Class **content**, tier
+**deep**; the delivered shape is the port's existing **logic + machines** half (block entity, menu,
+screen, redstone) plus one carried item and one carried damage type — no re-tiering.
+
+**Why it fits and why it is proven with one player.** Upstream's `ModuleItem.useOn` installs a
+module only for the block's owner, and `IPasscodeProtected.onIncorrectPasscodeEntered` hurts the
+player for a wrong code when the harming module is present (`incorrectPasscodeDamage` = 4, two
+hearts). Both effects belong to the keypad the port already ships, so the slice needs no camera,
+renderer or dimension, and its in-game assertion (health 20 → 16 on a wrong code, unchanged
+without the module) is fail-capable with a single player and a differential keypad. The owner gate
+is a pure rule with a unit test; a *second* player cannot be driven by the single-player
+`horizon-ctl` harness, so the in-game leg proves the owner installs and the differential, not the
+stranger's refusal.
+
+### Upstream read (`Geforce132/SecurityCraft`, branch `1.21.1`, commit `c4d35b0c8bf85c2a94c37a1f8ce37ef5ce1a6aa8`)
+
+Behaviour only; this remains a clean-room Rust rewrite. Files read: `items/ModuleItem.java`
+(`useOn`: `IModuleInventory`, `IOwnable.isOwnedBy`, `acceptsModule`, `!hasModule`, `insertModule`,
+creative keeps the stack), `api/IModuleInventory.java` (`insertModule`, `hasModule`,
+`dropAllModules`), `api/IPasscodeProtected.java` (`onIncorrectPasscodeEntered`: smart -> cooldown,
+harming -> hurt then `closeContainer`), `misc/CustomDamageSources.java`
+(`securitycraft:incorrect_passcode`), `ConfigHandler.java` (`incorrectPasscodeDamage` default 4),
+`SCContent.java` (`harming_module`, `ModuleItem(…, HARMING, false)`), `blockentities/KeypadBlockEntity.java`
+(accepted modules: allowlist, denylist, disguise, smart, harming). Data read from the jar:
+`data/securitycraft/recipe/harming_module.json` (III / IPI / ISI, 7 iron + paper + arrow),
+`data/securitycraft/damage_type/incorrect_passcode.json` (`exhaustion` 0.1, `message_id`
+`securitycraft.incorrectPasscode`, `scaling` `when_caused_by_living_non_player`), the death-message
+lang lines, the item model and the 16×16 texture.
+
+### Red proof (TDD, before the rule existed)
+
+`src/runtime.rs` gained the two tests first, with `may_install` and `wrong_code_damage` stubs that
+kept the old behaviour; `cargo test --offline` in a slot then failed with:
+
+```
+---- runtime::tests::a_harming_module_damages_a_wrong_code stdout ----
+
+thread 'runtime::tests::a_harming_module_damages_a_wrong_code' (73342) panicked at src/runtime.rs:656:9:
+assertion `left == right` failed: two hearts, as upstream's incorrectPasscodeDamage default
+  left: None
+ right: Some(4.0)
+
+---- runtime::tests::only_the_keypad_owner_may_install_a_module stdout ----
+
+thread 'runtime::tests::only_the_keypad_owner_may_install_a_module' (73361) panicked at src/runtime.rs:671:9:
+assertion failed: may_install(owner, 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef)
+```
+
+Log: `ports/_shared/evidence/securitycraft/sdk-0a875da-red.log`. The rules then became
+`owner == Some(player)` and `harming.then_some(INCORRECT_PASSCODE_DAMAGE)`; all 40 tests pass.
+
+### What the slice implements
+
+- **Owner on placement.** The key panel item gets an `ItemPart::on_block_placed_by`; the placer's
+  UUID is saved as `owner` (32 hex digits) on the keypad's block entity. A dispenser place has no
+  placer and leaves the keypad unowned, as upstream's `IOwnable` has no owner there either.
+- **Install.** `BlockPart::use_item_on`/`use_without_item` check the held stack before the block's
+  own use (upstream `ModuleItem.useOn` runs before the keypad's use): the owner's harming module is
+  added to the saved `modules` list once, and one item leaves the hand through
+  `ItemPlace::PlayerHand::extract` (a creative hand keeps it, as upstream's `!isCreative()` guard).
+- **Damage.** On a wrong submission `IPasscodeProtected`'s rule runs: `entity_hurt` with
+  `securitycraft:incorrect_passcode` and 4 health points against the player who submitted, only
+  when the module is installed. A right code and an empty/too-short entry hurt nothing.
+- **Drop.** `Hooks::block_drops` adds the module item back when a keypad breaks, reading the saved
+  data from the removed block entity (`IModuleInventory.dropAllModules`).
+- **Content.** `securitycraft:harming_module` (stack 1, the jar's model and texture), its shaped
+  recipe, the `securitycraft:incorrect_passcode` damage type, the death-message lang lines, and the
+  creative-tab entry.
+- **Readout.** `/securitycraft info` gains `modules=none|harming` and `owner=set|none` so the
+  harness (and a server operator) can read the state; both are harness additions, not gameplay.
+
+### Verification (SDK `0a875da`, 2026-11-21)
+
+Every step ran in a `ports/tools/build-slot.sh` lease with `CARGO_INCREMENTAL=0`; the SDK steps ran
+locally (`BUILD_LOCAL=1`, the remote box has no `cargo-horizon-mod`), on rustc 1.97.0. Logs are in
+[`../_shared/evidence/securitycraft/`](../../_shared/evidence/securitycraft/).
+
+| Check | Command | Result |
+|---|---|---|
+| Tests | `cargo test --offline` | **40 passed**, 0 failed (`sdk-0a875da-test.log`) |
+| Formatting | `cargo fmt --check` | clean |
+| Lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, **0 warnings** (`sdk-0a875da-clippy.log`) |
+| Package ×2 | `rm -f Cargo.lock; cargo horizon-mod build` twice + `cmp` | **identical** (`sdk-0a875da-build.log`) |
+| Delivered | `securitycraft.hmod` | **52,759 B**, SHA-256 `3497bfcca16344bb6d6f4dd03b48ae6e125aabfcbb1d7d87023a0ab445681d11`, **47 entries**, **no `Cargo.lock`** |
+| Registry check | `cargo horizon-mod check securitycraft.hmod` | `securitycraft 0.2.2 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, same SHA, **EXIT 0** (`sdk-0a875da-check.log`) |
+| Pinned build | `cargo horizon-mod fits securitycraft.hmod --build 0a875da` | `0a875da  made for`, EXIT 0, artefact SHA quoted in `sdk-fits.log` |
+| Another build | `cargo horizon-mod fits securitycraft.hmod --build 0b14f8a` | `0b14f8a  fits`, EXIT 0, same artefact SHA in `sdk-fits-other.log` |
+| Gate | `python3 ports/tools/verify-sdk-package.py securitycraft` | **1/1** |
+| In game PASS | launcher-built game carrying the package | **PASS + `EXIT:0`** (`securitycraft-e2e/e2e-launcher.log`) |
+| Control | the same scenario on the unmodified Nightly (`GAME=$CONTROL_GAME`) | **`EXIT:1`** at phase 1, the mod's ids unknown (`e2e-control.log`) |
+| SELFTEST (door) | `SELFTEST=1` | **`EXIT:1`** (`e2e-selftest.log`) |
+| SELFTEST (module) | `SELFTEST=harming` | **`EXIT:1`** at phase 12, the differential expected the missing damage (`e2e-selftest-harming.log`) |
+| Log checker | `check-e2e-logs.py securitycraft-e2e --strict` | `logs=5 ok=5`, exit 0 |
+
+Transcript quoted from `e2e-launcher.log`:
+
+```
+recipe result: securitycraft:harming_module
+grid slots still holding an item: 0
+fresh module keypad: securitycraft keypad 16 101 9 code=none entered= mode=check signal=0 powered=false status=0 modules=none owner=set door=none
+after installing the module: securitycraft keypad 16 101 9 code=set entered= mode=check signal=0 powered=false status=2 modules=harming owner=set door=none
+module still carried after a creative install: 1
+wrong code with the harming module: … status=1 modules=harming owner=set door=none health 20.0 -> 16.0
+right code with the harming module: … status=3 modules=harming owner=set door=none health 16.83333396911621 -> 18.666667938232425
+break: {"block":"minecraft:air","drops":{"securitycraft:harming_module":1,"securitycraft:keypad_item":1}}
+wrong code without the module: … status=1 modules=none owner=set door=none health 19.333332061767575 -> 19.333332061767575
+PASS: …; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke; a keypad without the module did not hurt a wrong code
+EXIT:0
+```
+
+The two-hearts value is read on the tick after the submit; reading it after the next `/securitycraft
+info` (six more ticks) shows 16.83 because full-food regeneration has already healed some of it —
+the first run of this phase caught that and the read was moved before the extra wait.
+
+### Coverage of this slice
+
+| Family | Status |
+|---|---|
+| `securitycraft:harming_module` item (give, read back, install) | **tested** — phase 10 (`modules=harming`) |
+| harming module recipe (III/IPI/ISI) | **tested** — phase 9: output id/count and an emptied grid (ingredients consumed) |
+| wrong-code damage with the module | **tested** — phase 10: 20.0 → 16.0 (two hearts) |
+| right code with the module | **tested** — phase 10: no loss |
+| keypad without the module (differential) | **tested** — phase 12: no loss |
+| module drop on break | **tested** — phase 11: `drops` names the module |
+| owner recorded on placement | **tested** — phase 10: `owner=set` |
+| non-owner install refused | **unit test** `only_the_keypad_owner_may_install_a_module`; not in-game (the harness has one player) |
+| allowlist / denylist / smart / disguise modules | **not ported** — the next module slices |
+| customize screen (remove/toggle a module) | **not ported** — no module inventory screen yet |
+| container closes after a harming hit | **not ported** — upstream's `player.closeContainer()`; the screen stays open here |
+| smart-module cooldown | **deviation kept** — the port's throttle is unconditional since review #1197, so a keypad without the smart module still rate-limits |
+
+### Deviations and gaps recorded by this slice
+
+1. **Modules are stored as ids, not item stacks.** Upstream saves an `ItemStack` list; the port
+   saves `modules` as a list of item-id strings. Installing, the effect and the drop are faithful;
+   a customize screen that round-trips components would need the stacks.
+2. **Only the harming module's key is resolved for the drop**, at registration
+   (`HARMING_MODULE_ITEM`): a `block_drops` listener has a `LevelHost`, not a `Host`, so it cannot
+   resolve an id at break time. A later module adds its key the same way.
+3. **The recipe's ingredients are vanilla ids.** Upstream keys the iron on `c:ingots/iron` and the
+   arrow on `minecraft:arrows`; the pack's convention tags are not shipped here, so the carry uses
+   `minecraft:iron_ingot` and `minecraft:arrow`, the same items the tags resolve to in ATM10.
+4. **Who may set the first code is still open.** The owner is now saved, but the set screen and
+   `/securitycraft code` do not yet check it (upstream's `verifyPasscodeSet` refuses a stranger).
+   That belongs to the owner/allowlist slice.
+5. **Creative is invulnerable**, so the damage phase switches to survival; the module install phase
+   stays in creative to prove the `!isCreative()` keep-the-stack rule.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port, rust-review
