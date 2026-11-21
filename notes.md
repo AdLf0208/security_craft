@@ -397,7 +397,7 @@ embedded run with its control → selftest. Evidence:
 | `cargo horizon-mod check --kind native-mod` | `securitycraft 0.1.0 (native-mod, format native-1/1d63e0a5…/5a64af93…, for 26.3)`, 26,658 B, same hash |
 | `tools/e2e-embedded.sh` (`EMBEDDED=1 CONTROL=1`, no `--dev-mod`) | **PASS + `EXIT:0`** (`e2e-embedded.log`), control leg shows the ids unknown |
 | `EMBEDDED=1 SELFTEST=1` | **FAIL + `EXIT:1`** at the door assertion (`e2e-embedded-selftest.log`) |
-| `check-e2e-logs.py securitycraft --strict` | `logs=6 ok=6`, exit 0 |
+| `check-e2e-logs.py securitycraft --strict` | `logs=5 ok=5`, exit 0 |
 | `upstream_ready.py securitycraft` | **READY**, exit 0 (the split-port blocker is gone) |
 
 Quoted from `e2e-embedded.log`:
@@ -774,7 +774,9 @@ Log: `ports/_shared/evidence/securitycraft/sdk-0a875da-red.log`. The rules then 
   `securitycraft:incorrect_passcode` and 4 health points against the player who submitted, only
   when the module is installed. A right code and an empty/too-short entry hurt nothing.
 - **Drop.** `Hooks::block_drops` adds the module item back when a keypad breaks, reading the saved
-  data from the removed block entity (`IModuleInventory.dropAllModules`).
+  data from the removed block entity (`IModuleInventory.dropAllModules`). *(Superseded by the
+  PR #1544 review fix: a level-side removal never reaches `block_drops`, so the drop now runs from
+  `block_changed` + `level_tick_post`; see the last section.)*
 - **Content.** `securitycraft:harming_module` (stack 1, the jar's model and texture), its shaped
   recipe, the `securitycraft:incorrect_passcode` damage type, the death-message lang lines, and the
   creative-tab entry.
@@ -859,3 +861,239 @@ the first run of this phase caught that and the read was moved before the extra 
    stays in creative to prove the `!isCreative()` keep-the-stack rule.
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port, rust-review
+
+## Review fixes (2026-11-21, PR #1544) — 0.2.3
+
+Three findings on 0.2.2 (`levzzz5154`): ship the `Cargo.lock` the launcher's clean build needs,
+preserve the installed module when the removal is not a loot roll, and keep the upstream MIT
+copyright line verbatim. Each was reproduced red before the change; the reds and their logs are
+quoted below.
+
+### 1. The shipped package carries its `Cargo.lock`
+
+**Red (the archive exactly as published, 0.2.2).** The package was extracted into a fresh
+directory (no `target/`, no build tree) and given to the launcher's clean build:
+
+```
+$ ports/_shared/bin/launcher-0.2.92/horizon-launcher native-build \
+      ~/.cache/horizon-e2e/red-lock/securitycraft-0.2.2 --instance e2e --trust-native-code --json
+Checking 1 mod
+Using the mod tools for the Nov 20 update kept from an earlier build
+Prebuilt game: only the mods compile (optimized)
+Compiling the mods against the prebuilt game
+error: /home/adlf/.cache/horizon-e2e/root/data/horizon-launcher/native/mods.incoming/securitycraft/Cargo.lock: No such file or directory (os error 2)
+NATIVE_BUILD_EXIT:1
+```
+
+Log: `../_shared/evidence/securitycraft/review-1544-red-lock.log`. The same pair was then run on
+the **final** archive so the receipt belongs to the bytes that ship: with the lock removed from the
+extracted 0.2.3, the identical error (`review-1544-red-lock-final.log`).
+
+**Fix.** `Cargo.lock` (49 packages, sha256 `8d448753f648…b296315`) is packed in the archive and
+the build step no longer runs `rm -f Cargo.lock` for this port. The archive now has **48 entries**
+(the 47 content/code files + `Cargo.lock`).
+
+**This is a deliberate, package-scoped exception** to the campaign's usual lock-free package rule
+(ARCHITECTURE.md §5, HANDOVER §0al). The rule exists because `cargo test` writes a lock that rides
+into a content-only package where nothing needs it. This package **declares a registry crate**
+(`sha2 = "0.10"`, the salted digest in `src/runtime.rs`), so a package without the lock cannot be
+built by the launcher at all — the reviewer's finding. The gate now agrees:
+`verify-sdk-package.py` prints `ok  packed Cargo.lock (declares a dependency)  48 entries; the
+launcher's clean build needs it`, and still refuses a lock in a package that declares no dependency.
+The exception is written in `Cargo.toml` beside the dependency as well.
+
+**Green (clean cache + receipt).** A fresh extraction of the final archive, no build tree:
+
+```
+$ ports/_shared/bin/launcher-0.2.92/horizon-launcher native-build \
+      ~/.cache/horizon-e2e/red-lock/securitycraft-0.2.3-final --instance e2e --trust-native-code --json
+Checking 1 mod
+Prebuilt game: only the mods compile (optimized)
+Compiling the mods against the prebuilt game
+Native mod adds 9 registry crates
+Registry dependencies are native code. Their build scripts and proc macros run during compilation, before the game starts.
+Build scripts: generic-array 0.14.7
+Installing the build
+Your mods are built (took 6 s).
+native-0a875da-6744658cf70e built and selected for its instance.
+NATIVE_BUILD_EXIT:0
+```
+
+The receipt is [`../_shared/evidence/securitycraft/review-1544-lock-receipt.md`](../../_shared/evidence/securitycraft/review-1544-lock-receipt.md)
+(archive sha, launcher version, both logs); the nine
+registry crates (`sha2`, `digest`, `block-buffer`, `crypto-common`, `generic-array`, `typenum`,
+`cpufeatures`, `cfg-if`, `libc`) are exactly the graph the lock pins. The launcher's own downloaded
+crate cache is shared, as for every other port; what is fresh is the package directory and the
+whole build of the mod against the prebuilt game — there is no incremental tree and no lock the
+machine could have carried over.
+
+### 2. The installed module survives a removal that is not a loot roll
+
+**Red (unit, rule absent).** The rule was stubbed to return nothing and the test run first:
+
+```
+---- support::tests::the_modules_drop_from_the_saved_list_without_a_loot_roll stdout ----
+
+thread 'support::tests::the_modules_drop_from_the_saved_list_without_a_loot_roll' (2602192) panicked at src/support.rs:1153:9:
+assertion `left == right` failed: an installed module is dropped by the removal itself
+  left: []
+ right: ["securitycraft:harming_module"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+test result: FAILED. 40 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Log: `../_shared/evidence/securitycraft/review-1544-red-unit.log`.
+
+**Red (in game, 0.2.2).** The new phase 11b installed the module, removed the keypad with
+`/setblock … minecraft:air` — no loot roll, no player break — and asked the world for item
+entities:
+
+```
+== phase 11b: a level-side removal leaves the installed module in the world ==
+keypad before the level-side removal: securitycraft keypad 18 101 -1 code=set entered= mode=check signal=0 powered=false status=2 modules=harming owner=set door=none
+after setblock: minecraft:air
+items near the removed keypad: []
+FAIL: the installed module vanished with a level-side removal (no item entity)
+EXIT:1
+```
+
+Log: `../_shared/evidence/securitycraft/review-1544-red-nonloot.log`.
+
+**Root cause, measured.** `block_drops` is a *loot roll*: it runs for a player's or mob's break and
+for an explosion's merged loot, but not for a level-side removal, so 0.2.2's module drop never ran
+for `/setblock`. The obvious replacement, `pre_remove_side_effects`, was probed on both paths
+(`review-1544-probe-nonloot.log`): it **does** run for a player's break (the module was dropped and
+picked up — `break: … "picked_up":{"securitycraft:harming_module":1}`), and it **does not** run for
+`/setblock` (`items: []`, the module gone). The entity is also already out of the world at
+`block_changed` time, so the module list cannot be read there either.
+
+**Fix: keep the list while the keypad stands, drop it when the block is gone.**
+
+- `src/support.rs` keeps the installed-module list per `(dimension id, pos)` (`INSTALLED`),
+  refreshed when the module is installed (`on_use`) and on every keypad tick, and forgotten when a
+  new block is placed at the position.
+- `Hooks::block_changed` (every state commit — player break, `/setblock`, `/fill`, a piston pushing
+  a block in, an explosion) sees `old = keypad, new = not keypad`, takes that list and queues it in
+  `PENDING_DROPS`.
+- `Hooks::level_tick_post` (read-only `block_changed` cannot spawn) spawns each module with
+  `LevelRef::spawn_item` at the block's centre with vanilla's default pickup delay of 10, then
+  forgets the entry.
+- The old `block_drops` module code is removed, so a player's break drops the module exactly once.
+  This is upstream's `IModuleInventory.dropAllModules` reached from a hook every removal path
+  reaches.
+
+**Green.** Phase 11 (player break) still drops it, and phase 11b (level-side) now leaves it in the
+world:
+
+```
+break: {"block":"minecraft:air","drops":{"securitycraft:harming_module":1,"securitycraft:keypad_item":1}}
+keypad before the level-side removal: securitycraft keypad 22 101 -4 code=set entered= mode=check signal=0 powered=false status=2 modules=harming owner=set door=none
+after setblock: minecraft:air
+items near the removed keypad: [{"item":"securitycraft:harming_module","count":1,"pos":[22.98380249450912,101.74249315365324,-3.205940992901731]}]
+```
+
+Standalone probe on both paths after the fix (`review-1544-probe-nonloot.log`):
+`/setblock` → `items: [{"item":"securitycraft:harming_module","count":1,…}]`; a survival break →
+`drops: {"securitycraft:harming_module":1}`, `picked_up: {}`.
+
+**Engine behaviour worth recording upstream (HANDOVER §9l candidate).** A level-side write
+(`/setblock`, `/fill`) removes the block entity **without** calling
+`BlockEntity.preRemoveSideEffects` at this pin, and `block_changed` is the only notice it gives —
+with a read-only level and the entity already gone. A mod that must preserve block-entity content
+on *every* removal therefore has to maintain the content itself (here: a tick-refreshed stash) and
+spawn it at `level_tick_post`. `block_drops` is not a universal removal hook and
+`pre_remove_side_effects` is not either; the two together still miss this path.
+
+### 3. The upstream MIT copyright line is kept verbatim
+
+**Red.**
+
+```
+$ grep -F "Copyright (c) 2025 The SecurityCraft development team" LICENSE
+grep exit: 1
+$ head -4 LICENSE
+MIT License
+
+Copyright (c) Geforce and contributors (SecurityCraft)
+Copyright (c) 2026 AdLf0208 (Horizon port)
+$ curl -sS https://raw.githubusercontent.com/Geforce132/SecurityCraft/c4d35b0c8bf85c2a94c37a1f8ce37ef5ce1a6aa8/LICENSE | head -4
+MIT License
+
+Copyright (c) 2025 The SecurityCraft development team
+```
+
+Log: `../_shared/evidence/securitycraft/review-1544-red-licence.log`. The packaged `LICENSE` had
+the same paraphrase, so an artifact-only download did not carry the original line.
+
+**Fix.** `LICENSE` now reads `Copyright (c) 2025 The SecurityCraft development team` verbatim, above
+the port's own `Copyright (c) 2026 AdLf0208 (Horizon port)`, and `LICENSE-NOTICE.md` quotes the same
+line and the licence URL.
+
+**Upstream author and URL for the listing.** The jar's `META-INF/neoforge.mods.toml` says
+`authors="Geforce, bl4ckscor3, Redstone_Dubstep, and ChainmailPickaxe"` and
+`license="MIT https://github.com/Geforce132/SecurityCraft/blob/master/LICENSE"`;
+`horizon-mod.toml` now carries that author line exactly (beside `AdLf0208` for the port), so the
+registry listing names the real authors. Repository: <https://github.com/Geforce132/SecurityCraft>
+(`1.21.1` branch, commit `c4d35b0c8bf85c2a94c37a1f8ce37ef5ce1a6aa8`).
+
+### Verification (0.2.3, SDK `0a875da`, 2026-11-21)
+
+Every step ran in a `build-slot.sh` lease with `CARGO_INCREMENTAL=0`; logs are in
+[`../_shared/evidence/securitycraft/`](../../_shared/evidence/securitycraft/). The unit-test loop
+used `sha2` from the packed lock's pins.
+
+| Check | Command | Result |
+|---|---|---|
+| Tests | `cargo test --offline` | **41 passed**, 0 failed (`review-1544-test.log`) |
+| Formatting | `cargo fmt --check` | exit 0 (`review-1544-fmt.log`) |
+| Lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, **0 warnings** (`review-1544-clippy.log`) |
+| Package ×2 | `cargo horizon-mod build` twice + `cmp` | **identical** (`review-1544-build-1.log`, `-2.log`) |
+| Delivered | `securitycraft.hmod` | **57,881 B**, SHA-256 `978a23652d2580b7e0486ff0d7f819c20330593fff3ab140edde5ef1f19e7112`, **48 entries** (incl. `Cargo.lock`) |
+| Registry check | `cargo horizon-mod check securitycraft.hmod` | `securitycraft 0.2.3 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, same SHA, **EXIT 0** (`review-1544-check.log`) |
+| Pinned build | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0, sha `978a2365…` (`review-1544-fits.log`) |
+| Another build | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0, sha `978a2365…` (`review-1544-fits-other.log`) |
+| Clean launcher build | extracted archive, `native-build` | `native-0a875da-6744658cf70e built`, EXIT 0 (`review-1544-lock-clean-build.log`) |
+| Clean build, lock removed | same extraction | `error: …Cargo.lock: No such file or directory (os error 2)`, EXIT 1 (`review-1544-red-lock-final.log`) |
+| Gate | `verify-sdk-package.py securitycraft` | **1/1**, incl. `packed Cargo.lock (declares a dependency)` (`review-1544-verify-sdk-package.log`) |
+| In game PASS | launcher-built game carrying 0.2.3 | **PASS + `EXIT:0`** (`securitycraft-e2e/e2e-launcher.log`) |
+| Control | the same scenario on the unmodified Nightly | **`EXIT:1`** at phase 1 (the mod's ids are unknown) (`e2e-launcher-control.log`) |
+| SELFTEST (door) | `SELFTEST=1` | **`EXIT:1`**, "expected the door OPEN after a wrong code" (`e2e-selftest.log`) |
+| SELFTEST (module) | `SELFTEST=harming` | **`EXIT:1`**, "expected a keypad without the module to hurt the player" (`e2e-selftest-harming.log`) |
+| SELFTEST (level removal) | `SELFTEST=nonloot` | **`EXIT:1`**, "expected the module to vanish with a level-side removal" — the phase 11b assertion fails when inverted, on the delivered build (`e2e-selftest-nonloot.log`) |
+| Log checker | `check-e2e-logs.py securitycraft-e2e --strict` | `logs=6 ok=6`, exit 0 |
+
+The control leg now says why it fails (`FAIL: the game refused securitycraft:iron_door_reinforced:
+the package is not loaded`) instead of `set -e` aborting silently. Phase 11 also waits for `give`'s
+next tick before selecting the pickaxe; a loaded machine made the old ordering race, and the leg
+now reports that rather than exiting without a verdict.
+
+`src/runtime.rs` is unchanged by this review (`faafca149260…`), and it is byte-identical inside the
+package. `src/support.rs` (`c917494b…`) carries the stash and the two hooks; `src/lib.rs`
+(`b536ea84…`) names them.
+
+### Changelog for the resubmission (0.2.3)
+
+> Supersedes #1544. Three review findings fixed: (1) the package now **ships its `Cargo.lock`** —
+> it declares `sha2`, and the launcher's clean `native-build` refuses a package that declares a
+> registry crate without a lock (`error: …/Cargo.lock: No such file or directory (os error 2)`); the
+> same extraction with the lock builds (`native-0a875da-6744658cf70e built`, receipt in
+> `../_shared/evidence/securitycraft/review-1544-lock-clean-build.log`). This is a package-scoped
+> exception to the lock-free rule, recorded in `Cargo.toml` and here. (2) An installed module now
+> survives a removal that is not a loot roll: the drop moved from the loot-only `block_drops` to a
+> list kept while the keypad stands (`block_changed` + `level_tick_post`), proven in game with a
+> level-side `/setblock` and inverted in `SELFTEST=nonloot`. (3) `LICENSE` keeps upstream's line
+> verbatim — `Copyright (c) 2025 The SecurityCraft development team` — and `horizon-mod.toml` names
+> the jar's authors; the port's own copyright follows. `src/runtime.rs` is unchanged.
+
+### Coverage after this review
+
+| Family | Status |
+|---|---|
+| module drop on a player's break | **tested** — phase 11 (`drops` names the module; `picked_up` accepted) |
+| module drop on a level-side removal (`/setblock`) | **tested** — phase 11b: an item entity at the keypad's position |
+| one removal drops one module (no double drop) | **unit test** `drop_from_the_saved_list…` takes the list once; phase 11's `drops` count is 1 |
+| the archive builds on the launcher's clean path | **tested** — `review-1544-lock-clean-build.log`, and the counterfactual without the lock |
+| the upstream copyright line travels in the package | **tested** — `unzip -p securitycraft.hmod LICENSE` (red log shows the old paraphrase) |
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port

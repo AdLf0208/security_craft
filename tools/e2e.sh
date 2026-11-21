@@ -37,11 +37,14 @@
 # 10. OWNER + MODULE: the placer is the keypad's owner; the owner installs the
 #     module; a wrong code takes two hearts and a right code none.
 # 11. DROPS: breaking the keypad in survival with a pickaxe drops the module.
+# 11b. LEVEL REMOVAL: `/setblock` (no loot hook, no player break) still leaves
+#     the installed module in the world as a dropped item.
 # 12. DIFFERENTIAL: a keypad without the module does not hurt a wrong code.
 #
 #   tools/e2e.sh               # the scenario above
 #   SELFTEST=1 tools/e2e.sh    # phase 4 expects the door CLOSED: must exit 1
 #   SELFTEST=harming tools/e2e.sh  # phase 12 expects the missing damage: exit 1
+#   SELFTEST=nonloot tools/e2e.sh  # phase 11b expects the module to have vanished: exit 1
 #   CONTROL=1 tools/e2e.sh     # no package at all: the ids must be unknown
 #   GAME=<an unmodified game> tools/e2e.sh   # the differential: the first phase fails
 #
@@ -246,8 +249,8 @@ DOOR_X=$PX; DOOR_Z=$PZ
 KEY_X=$((PX+1)); KEY_Y=101; KEY_Z=$PZ
 
 say "phase 1: the reinforced door item places both halves, the key panel places a keypad"
-ctl give "$DOOR" 2 >/dev/null
-ctl give securitycraft:keypad_item 3 >/dev/null
+ctl give "$DOOR" 2 >/dev/null || fail "the game refused $DOOR: the package is not loaded"
+ctl give securitycraft:keypad_item 3 >/dev/null || fail "the game refused securitycraft:keypad_item: the package is not loaded"
 ctl wait 6
 ctl select "$DOOR" >/dev/null
 ctl place "$DOOR_X" 101 "$DOOR_Z" >/dev/null || fail "the reinforced door item did not place"
@@ -514,14 +517,61 @@ say "phase 11: breaking the keypad drops the installed module"
 # `requires_tool`, so a bare hand would drop nothing either.
 ctl command "gamemode survival @s" >/dev/null
 ctl give minecraft:diamond_pickaxe 1 >/dev/null
-ctl select minecraft:diamond_pickaxe >/dev/null
+# `give` lands on the next tick; selecting before it arrives fails.
+ctl wait 6
+ctl select minecraft:diamond_pickaxe >/dev/null || fail "could not select the pickaxe for the break"
 ctl wait 6
 echo "breaking as $(ctl state | jq -r '.gamemode') with $(ctl inventory | jq -r '.held.item // "nothing"')"
-broken=$(ctl break "$MODULE_X" "$MODULE_Y" "$MODULE_Z" --timeout 40)
+broken=$(ctl break "$MODULE_X" "$MODULE_Y" "$MODULE_Z" --timeout 40) \
+    || fail "the module keypad did not break: $broken"
 echo "break: $(echo "$broken" | jq -c '{block, drops}')"
 [ "$(echo "$broken" | jq -r '.block')" = "minecraft:air" ] || fail "the module keypad did not break"
-[ "$(echo "$broken" | jq -r '.drops["securitycraft:harming_module"] // 0')" -ge 1 ] \
-    || fail "the installed harming module did not drop"
+# The module may be on the ground or already picked up; either way it survived.
+module_kept=$(echo "$broken" | jq -r '((.drops["securitycraft:harming_module"] // 0) + (.picked_up["securitycraft:harming_module"] // 0))')
+[ "$module_kept" -ge 1 ] || fail "the installed harming module did not drop (or land in the inventory)"
+
+say "phase 11b: a level-side removal leaves the installed module in the world"
+# `/setblock` replaces the block through `Level.setBlock`: `Block.dropResources`
+# never runs, so neither the loot table nor `block_drops` fires, and no player
+# broke it. The module is the block entity's own content, so the block entity's
+# removal must drop it — otherwise the block and its module both vanish.
+NL_X=$((PX+4)); NL_Y=101; NL_Z=$((PZ-4))
+ctl command "gamemode creative @s" >/dev/null
+# No module entity from the phase 11 break may be counted here.
+ctl command "kill @e[type=minecraft:item]" >/dev/null
+ctl give securitycraft:keypad_item 1 >/dev/null
+ctl give securitycraft:harming_module 1 >/dev/null
+ctl wait 6
+ctl tp "$(( NL_X + 1 )).5" 101 "$(( NL_Z + 2 )).5" >/dev/null
+ctl wait 6
+ctl look 180 0
+ctl select securitycraft:keypad_item >/dev/null
+ctl place "$NL_X" "$NL_Y" "$NL_Z" >/dev/null || fail "the level-removal keypad did not place"
+ctl wait 4
+code_cmd "$NL_X" "$NL_Y" "$NL_Z" 1234
+ctl select securitycraft:harming_module >/dev/null
+ctl tp "$(( NL_X + 1 )).5" 101 "$(( NL_Z + 2 )).5" >/dev/null
+ctl wait 4
+ctl look 180 0
+ctl look-at block "$NL_X" "$NL_Y" "$NL_Z" south >/dev/null 2>&1 || true
+ctl interact "$NL_X" "$NL_Y" "$NL_Z" south >/dev/null || fail "the keypad did not take the module"
+ctl wait 6
+line=$(info "$NL_X" "$NL_Y" "$NL_Z")
+echo "keypad before the level-side removal: $line"
+[ "$(field modules "$line")" = harming ] || fail "the module was not installed before the removal: $line"
+# The level removes it: no loot roll, no player break.
+ctl command "setblock $NL_X $NL_Y $NL_Z minecraft:air" >/dev/null
+ctl wait 6
+echo "after setblock: $(block_name "$NL_X" "$NL_Y" "$NL_Z")"
+[ "$(block_name "$NL_X" "$NL_Y" "$NL_Z")" = minecraft:air ] || fail "setblock did not remove the keypad"
+items=$(ctl entities 8 minecraft:item | jq -c '[.entities[] | {item: .item.item, count: .item.count, pos: .pos}]')
+echo "items near the removed keypad: $items"
+count=$(jq '[.[] | select(.item == "securitycraft:harming_module")] | length' <<<"$items")
+if [ "$SELFTEST" = nonloot ]; then
+    # Fail-capability: invert the assertion — the module must NOT survive.
+    [ "$count" -eq 0 ] || fail "SELFTEST: expected the module to vanish with a level-side removal"
+fi
+[ "$count" -ge 1 ] || fail "the installed module vanished with a level-side removal (no item entity)"
 
 say "phase 12 (differential): a keypad without the module does not hurt a wrong code"
 DIFF_X=$((PX-4)); DIFF_Y=101; DIFF_Z=$PZ
@@ -556,5 +606,5 @@ ctl close >/dev/null 2>&1 || true
 ctl command "gamemode creative @s" >/dev/null
 ctl wait 4
 
-echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes rate-limited a correct one; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke; a keypad without the module did not hurt a wrong code"
+echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes rate-limited a correct one; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke — and survived a level-side /setblock removal as a dropped item; a keypad without the module did not hurt a wrong code"
 # The cleanup trap prints the run's exit status as the last line.

@@ -15,12 +15,12 @@ pub mod runtime;
 mod support;
 
 use mod_api::{
-    self, BlockDropsEvent, BlockEntityEvent, BlockEntityPart, BlockEntityTickEvent,
-    BlockEntityTicksEvent, BlockPart, Flow, Hooks, InteractionResult, IsSignalSourceEvent,
-    ItemPart, LevelHost, LevelSide, MenuButtonEvent, MenuClosedEvent, OnBlockPlacedByEvent,
-    PlayerContainerCloseEvent, RegisterCommandsEvent, Registrar, RegistrationContext,
-    RunModCommandEvent, Screen, ScreenClickEvent, ScreenDrawEvent, ServerHost,
-    StateForPlacementEvent, UseItemOnEvent, UseWithoutItemEvent,
+    self, BlockChangedEvent, BlockEntityEvent, BlockEntityPart, BlockEntityTickEvent,
+    BlockEntityTicksEvent, BlockPart, Flow, Hooks, HostSide, InteractionResult,
+    IsSignalSourceEvent, ItemPart, LevelHost, LevelSide, LevelTickPostEvent, MenuButtonEvent,
+    MenuClosedEvent, OnBlockPlacedByEvent, PlayerContainerCloseEvent, RegisterCommandsEvent,
+    Registrar, RegistrationContext, RunModCommandEvent, Screen, ScreenClickEvent, ScreenDrawEvent,
+    ServerHost, StateForPlacementEvent, UseItemOnEvent, UseWithoutItemEvent,
 };
 
 /// The keypad: its block entity (screen, menu, signal) and its block (placement, redstone).
@@ -160,12 +160,6 @@ impl Hooks for Mod {
         support::set_harming_module_item(harming_module);
     }
 
-    /// A keypad breaks: its installed modules drop beside it (`dropAllModules`).
-    fn block_drops(&self, level: &dyn LevelHost, event: &mut BlockDropsEvent<'_>) -> Flow {
-        support::on_block_drops(level, event);
-        Flow::Continue
-    }
-
     /// `/securitycraft info|code`: the harness controls this slice's e2e needs (a headless
     /// harness cannot type into the screen).
     fn register_commands(&self, _host: &mut dyn ServerHost, event: &mut RegisterCommandsEvent<'_>) {
@@ -192,6 +186,23 @@ impl Hooks for Mod {
     ) {
         if event.menu == support::KEYPAD_MENU {
             support::on_container_closed(event.player, event.dimension, event.pos);
+        }
+    }
+
+    /// A state was committed. A keypad that is gone — a player's break,
+    /// `/setblock`, `/fill`, a piston, an explosion — queues its installed
+    /// modules for a drop; `block_drops` (a loot roll) is not asked for a
+    /// level-side removal, so a module dropped only there vanishes with the
+    /// block. Upstream's `IModuleInventory.dropAllModules`.
+    fn block_changed(&self, level: &dyn LevelHost, event: &mut BlockChangedEvent) {
+        support::on_block_changed(level, event);
+    }
+
+    /// The level ticked: the modules of a keypad removed during it are spawned
+    /// as item entities (`block_changed` has a read-only level).
+    fn level_tick_post(&self, host: HostSide, event: &mut LevelTickPostEvent) {
+        if let HostSide::Server(host) = host {
+            support::on_level_tick_post(host, event);
         }
     }
 

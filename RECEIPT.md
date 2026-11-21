@@ -1,17 +1,10 @@
-# Package receipt — securitycraft 0.2.2
+# Package receipt — securitycraft 0.2.3
 
 | field | value |
 |---|---|
-| version | `0.2.2` |
+| version | `0.2.3` |
 | file | `securitycraft.hmod` |
-| bytes | 52,759 |
-| sha256 | `3497bfcca16344bb6d6f4dd03b48ae6e125aabfcbb1d7d87023a0ab445681d11` |
-| source | this tag — the tree here is the source that produced the archive |
-| game | 26.3 |
+| bytes | 57,881 |
+| sha256 | `978a23652d2580b7e0486ff0d7f819c20330593fff3ab140edde5ef1f19e7112` |
+| cargo lock | packed (the package declares `sha2`) |
 | horizon | `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` |
-| horizon-mixins | `e59da9094f0c2fdda6c627fe9eff22dec6a906f0` |
-
-## Verification of these exact bytes
-
-See `notes.md` and `VALIDATION.md` at this tag for the full ladder; the digest above is the
-release asset's.

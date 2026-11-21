@@ -24,10 +24,11 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mod_api::{
-    BlockDropsEvent, BlockEntityTickEvent, ClientHost, Compound, DrawContext, Host,
-    HostTransaction, InteractionResult, ItemDrop, ItemKey, ItemPlace, ItemResource, ItemStack,
-    LevelHost, LevelRef, MenuButtonEvent, ModContainer, OnBlockPlacedByEvent, RandomSource, Screen,
-    ScreenClickEvent, ScreenDrawEvent, ServerHost, StateForPlacementEvent, Tag, Text,
+    BlockChangedEvent, BlockEntityTickEvent, ClientHost, Compound, DrawContext, Host,
+    HostTransaction, InteractionResult, ItemKey, ItemPlace, ItemResource, ItemStack, LevelHost,
+    LevelRef, LevelTickPostEvent, MenuButtonEvent, ModContainer, OnBlockPlacedByEvent,
+    RandomSource, Screen, ScreenClickEvent, ScreenDrawEvent, ServerHost, StateForPlacementEvent,
+    Tag, Text,
 };
 
 use crate::runtime::{
@@ -303,6 +304,11 @@ pub(crate) fn on_block_placed_by(host: &mut dyn ServerHost, event: &mut OnBlockP
     };
     set_string(&mut data, KEY_OWNER, &format!("{:032x}", placer.uuid()));
     let _ = entity.replace_data(host, data);
+    // A fresh block owns this position: no earlier keypad's modules are dropped
+    // if this one is removed before its first tick.
+    if let Some(dimension) = level.dimension().id(&*host) {
+        forget_modules(&dimension, event.pos);
+    }
 }
 
 /// A keypad block entity ticks: the signal countdown and the menu's data slots
@@ -340,6 +346,12 @@ pub(crate) fn on_tick(host: &mut dyn ServerHost, event: &mut BlockEntityTickEven
     let fields = &mut *event.entity;
     // A key written by the retired build is scrubbed, never read.
     scrub_legacy_entry(&mut fields.nbt);
+    // The removal a level-side write makes is heard after this entity is gone,
+    // so what it holds has to be known before that: refresh it every tick.
+    let dimension = level.dimension().id(&*host);
+    if let Some(dimension) = dimension.as_deref() {
+        remember_modules(dimension, pos, modules(&fields.nbt));
+    }
     let signal = int(&fields.nbt, KEY_SIGNAL);
     if signal > 0 {
         let (next, turns_off) = tick_signal(signal);
@@ -348,10 +360,7 @@ pub(crate) fn on_tick(host: &mut dyn ServerHost, event: &mut BlockEntityTickEven
             host.set_block_property(pos, POWERED, "false");
         }
     }
-    let typed = level
-        .dimension()
-        .id(&*host)
-        .map_or(0, |dimension| typed_at_keypad(&dimension, pos));
+    let typed = dimension.map_or(0, |dimension| typed_at_keypad(&dimension, pos));
     let slots = data_slots(&*host, level, pos, &fields.nbt, typed);
     if fields.data != slots {
         fields.data = slots;
@@ -380,8 +389,14 @@ pub(crate) fn on_use(
         && !has_module(&data, HARMING_MODULE)
     {
         add_module(&mut data, HARMING_MODULE);
+        // The removal that follows a level-side write hears this entity gone,
+        // so the list it drops from is recorded here, not read at removal.
+        let installed = modules(&data);
         if entity.replace_data(host, data).is_err() {
             return None;
+        }
+        if let Some(dimension) = level.dimension().id(&*host) {
+            remember_modules(&dimension, pos, installed);
         }
         let resource = ItemResource::of(stack);
         let hand = ItemPlace::PlayerHand {
@@ -800,42 +815,124 @@ pub(crate) fn on_state_for_placement(
 
 // --- drops ----------------------------------------------------------------
 
-/// A keypad breaks: the modules installed in it drop beside it, as upstream's
-/// `IModuleInventory.dropAllModules` drops each module item. The block entity's
-/// saved data is read through `level.block_entity_data`, since the entity itself
-/// is already out of the world by now.
-pub(crate) fn on_block_drops(level: &dyn LevelHost, event: &mut BlockDropsEvent<'_>) {
-    if level.state_block(event.state) != Some(KEYPAD) {
+/// The module ids an installed list contributes to a removal drop: the modules
+/// this slice knows, so a corrupt saved value or a later slice's id drops
+/// nothing it has no item key for.
+fn dropped_module_ids(installed: &[String]) -> Vec<String> {
+    installed
+        .iter()
+        .filter(|module| module.as_str() == HARMING_MODULE)
+        .cloned()
+        .collect()
+}
+
+/// One keypad's installed modules, keyed by the dimension it stands in (its id,
+/// which a `DimensionKey` resolves) and its position.
+type KeypadKey = (String, [i32; 3]);
+
+/// A keypad key and the module ids held there, in a store both removal paths share.
+type ModuleStore = Mutex<Vec<(KeypadKey, Vec<String>)>>;
+
+/// The modules a standing keypad holds, read before a removal can destroy the
+/// block entity. A `block_changed` removal is heard after the entity is gone,
+/// so the list is kept here, refreshed on install and on every tick.
+static INSTALLED: OnceLock<ModuleStore> = OnceLock::new();
+
+/// Modules whose keypad was removed and whose item entities wait for the next
+/// level tick: `block_changed` sees a read-only level, and every path that
+/// removes the block reaches it, so the drop is spawned one tick later.
+static PENDING_DROPS: OnceLock<ModuleStore> = OnceLock::new();
+
+fn installed() -> MutexGuard<'static, Vec<(KeypadKey, Vec<String>)>> {
+    INSTALLED
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .expect("the installed-module store is never poisoned")
+}
+
+fn pending_drops() -> MutexGuard<'static, Vec<(KeypadKey, Vec<String>)>> {
+    PENDING_DROPS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .expect("the pending-drop store is never poisoned")
+}
+
+/// Remember what a keypad holds, replacing an older list at the same key.
+fn remember_modules(dimension: &str, pos: [i32; 3], modules: Vec<String>) {
+    let mut store = installed();
+    store.retain(|(key, _)| !(key.0 == dimension && key.1 == pos));
+    if !modules.is_empty() {
+        store.push(((dimension.to_owned(), pos), modules));
+    }
+}
+
+/// Forget a keypad's list: a new block occupies the position.
+fn forget_modules(dimension: &str, pos: [i32; 3]) {
+    installed().retain(|(key, _)| !(key.0 == dimension && key.1 == pos));
+}
+
+/// Take a removed keypad's list out of the store.
+fn take_modules(dimension: &str, pos: [i32; 3]) -> Vec<String> {
+    let mut store = installed();
+    let found = store
+        .iter()
+        .position(|(key, _)| key.0 == dimension && key.1 == pos);
+    found.map_or_else(Vec::new, |index| store.remove(index).1)
+}
+
+/// A state was committed: a keypad that is gone queues its modules for a drop.
+///
+/// Every removal path reaches this hook — a player's break, `/setblock`,
+/// `/fill`, a piston pushing a block in, an explosion — while a loot roll
+/// (`block_drops`) is not asked for a level-side removal, and the block entity
+/// is already gone, so the list comes from the store kept while it stood.
+pub(crate) fn on_block_changed(level: &dyn LevelHost, event: &mut BlockChangedEvent) {
+    if !is_keypad(level, event.old) || is_keypad(level, event.new) {
         return;
     }
-    let Some(entity) = event.block_entity else {
+    let dimension = event.dimension.key().id().to_owned();
+    let pos = [event.pos.x, event.pos.y, event.pos.z];
+    let modules = take_modules(&dimension, pos);
+    if dropped_module_ids(&modules).is_empty() {
+        return;
+    }
+    pending_drops().push(((dimension, pos), modules));
+}
+
+/// The level ticked: spawn the items of the keypads removed during it.
+pub(crate) fn on_level_tick_post(host: &mut dyn ServerHost, event: &mut LevelTickPostEvent) {
+    let Some(dimension) = event.level.dimension().id(&*host) else {
         return;
     };
-    let Some(data) = level.block_entity_data(entity) else {
-        return;
+    let ready: Vec<(KeypadKey, Vec<String>)> = {
+        let mut pending = pending_drops();
+        let mut ready = Vec::new();
+        let mut index = 0;
+        while index < pending.len() {
+            if pending[index].0.0 == dimension {
+                ready.push(pending.remove(index));
+            } else {
+                index += 1;
+            }
+        }
+        ready
     };
     let Some(item) = harming_module_item() else {
         return;
     };
-    for module in modules(&data) {
-        // The only module this slice installs; an id from a later slice has no key yet.
-        if module != HARMING_MODULE {
-            continue;
+    for ((_, pos), modules) in ready {
+        for _ in dropped_module_ids(&modules) {
+            let _ = event.level.spawn_item(
+                host,
+                f64::from(pos[0]) + 0.5,
+                f64::from(pos[1]) + 0.5,
+                f64::from(pos[2]) + 0.5,
+                ItemStack::of(item),
+                10,
+            );
         }
-        event.drops.push(ItemDrop::new(
-            ItemStack::of(item),
-            [
-                f64::from(event.pos.x) + 0.5,
-                f64::from(event.pos.y) + 0.5,
-                f64::from(event.pos.z) + 0.5,
-            ],
-            [0.0, 0.0, 0.0],
-            10,
-        ));
     }
 }
-
-// --- the container and the harness commands -------------------------------
 
 /// The keypad's container: one hidden slot (no face exposes it, so no hopper
 /// can put anything in) and the mod menu the block's use opens.
@@ -1136,6 +1233,50 @@ mod tests {
         // A corrupt saved value is ignored rather than read as a module.
         set_int(&mut nbt, KEY_MODULES, 1);
         assert!(!has_module(&nbt, HARMING_MODULE));
+    }
+
+    #[test]
+    fn the_modules_drop_from_the_saved_list_without_a_loot_roll() {
+        // A level-side removal (`/setblock`, a piston, an explosion) rolls no
+        // loot and has no breaker, so the module drop cannot come from
+        // `block_drops`; it is read from the block entity before the removal.
+        let mut nbt = Compound::new();
+        add_module(&mut nbt, HARMING_MODULE);
+        assert_eq!(
+            dropped_module_ids(&modules(&nbt)),
+            vec![HARMING_MODULE.to_owned()],
+            "an installed module is dropped by the removal itself"
+        );
+        // A keypad with no module drops nothing, and a corrupt saved value is
+        // not read as a module.
+        assert!(dropped_module_ids(&modules(&Compound::new())).is_empty());
+        let mut corrupt = Compound::new();
+        set_int(&mut corrupt, KEY_MODULES, 1);
+        assert!(dropped_module_ids(&modules(&corrupt)).is_empty());
+
+        // The list is kept before the removal and taken by it exactly once.
+        let overworld = "minecraft:overworld";
+        let nether = "minecraft:the_nether";
+        remember_modules(overworld, [5, 64, 5], modules(&nbt));
+        assert_eq!(
+            take_modules(overworld, [5, 64, 5]),
+            vec![HARMING_MODULE.to_owned()]
+        );
+        assert!(
+            take_modules(overworld, [5, 64, 5]).is_empty(),
+            "one removal drops one list"
+        );
+        // A new block at the position forgets an older keypad's list.
+        remember_modules(overworld, [6, 64, 6], modules(&nbt));
+        forget_modules(overworld, [6, 64, 6]);
+        assert!(take_modules(overworld, [6, 64, 6]).is_empty());
+        // The same coordinates in another dimension are another keypad.
+        remember_modules(nether, [5, 64, 5], modules(&nbt));
+        assert!(take_modules(overworld, [5, 64, 5]).is_empty());
+        assert_eq!(
+            take_modules(nether, [5, 64, 5]),
+            vec![HARMING_MODULE.to_owned()]
+        );
     }
 
     #[test]

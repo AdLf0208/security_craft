@@ -8,7 +8,7 @@
 #
 # Cargo's name and version are not the mod's identity: horizon-mod.toml is.
 name = "securitycraft"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 license = "MIT"
 description = "SecurityCraft for Horizon: the keypad and the reinforced door (slice 1)"
@@ -21,5 +21,8 @@ publish = false
 horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }
 # The keypad stores a salted SHA-256 digest of its code, as upstream stores a salted PBKDF2 hash;
 # `src/runtime.rs` (the carried, byte-identical rules module) is the only user. It is this
-# package's one registry dependency, so the resolved `Cargo.lock` travels with the package.
+# package's one registry dependency, so the resolved `Cargo.lock` travels **inside** the
+# package: the launcher's clean build (`native-build`) refuses a package that declares a crate
+# without a lock. That is a deliberate, package-scoped exception to the campaign's usual
+# lock-free package (ARCHITECTURE.md §5); the bytes are pinned by the lock and by `fits`.
 sha2 = "0.10"

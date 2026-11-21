@@ -5,7 +5,7 @@ against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`.
 
 - **`horizon-mod.toml`** — the only manifest and the only identity
-  (`id = "securitycraft"`, `version = "0.2.2"`, `side = "both"`, `[native]` pins).
+  (`id = "securitycraft"`, `version = "0.2.3"`, `side = "both"`, `[native]` pins).
 - **`src/runtime.rs`** — the pure rules (code shape, salted digest, verdict, entry,
   mode, signal countdown, module permission and wrong-code damage) and their tests.
 - **`src/support.rs`** — the game glue: the block entity's saved data (code, salt,
@@ -20,7 +20,9 @@ against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
   `securitycraft:incorrect_passcode` damage type), the jar's blockstates, models,
   textures, loot, recipes, tag and lang, plus the keypad's content menu type.
 - **`securitycraft.hmod`** — the delivered package (built by
-  `cargo horizon-mod build`, copied out of `target/`; no `Cargo.lock` inside).
+  `cargo horizon-mod build`, copied out of `target/`). It **packs `Cargo.lock`**: this is the one
+  package in the campaign that declares a registry crate (`sha2`), and the launcher's clean build
+  (`native-build`) refuses a package that declares one without its lock.
 - **`FINDINGS.md`** — the upstream behaviour read; **`notes.md`** — scope, hook map,
   deviations, verification and gaps.
 
@@ -36,8 +38,7 @@ ports/tools/build-slot.sh run --job W1-securitycraft --port ports/securitycraft 
     bash -c 'cd ports/securitycraft && cargo fmt --check &&
         cargo clippy --all-targets --offline -- -D warnings'
 BUILD_LOCAL=1 ports/tools/build-slot.sh run --job W1-securitycraft --port ports/securitycraft \
-    --step build -- bash -c 'cd ports/securitycraft && rm -f Cargo.lock &&
-        CARGO_INCREMENTAL=0 cargo horizon-mod build'
+    --step build -- bash -c 'cd ports/securitycraft && CARGO_INCREMENTAL=0 cargo horizon-mod build'
 BUILD_LOCAL=1 ports/tools/build-slot.sh run --job W1-securitycraft --port ports/securitycraft \
     --step check -- bash -c 'cd ports/securitycraft &&
         cargo horizon-mod check securitycraft.hmod &&
@@ -53,7 +54,8 @@ the launcher's `native-build`.
 `ports/tools/launcher-game.sh build securitycraft --port ports/securitycraft` compiles
 this package into the pinned Nightly and exports it; `tools/e2e.sh` then drives a real
 game with `horizon-ctl` (place, screen keys, wrong/right codes, module install, health,
-recipe, break drops). `SELFTEST=1` and `SELFTEST=harming` prove the assertions can
+recipe, break drops, and a level-side `/setblock` removal that must keep the module). `SELFTEST=1`
+and `SELFTEST=harming` prove the assertions can
 fail, and `GAME=$CONTROL_GAME` runs the same scenario on an unmodified game, which
 fails at the first mod id. The evidence is under
 `ports/_shared/evidence/securitycraft-e2e/`.
