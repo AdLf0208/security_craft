@@ -40,11 +40,17 @@
 # 11b. LEVEL REMOVAL: `/setblock` (no loot hook, no player break) still leaves
 #     the installed module in the world as a dropped item.
 # 12. DIFFERENTIAL: a keypad without the module does not hurt a wrong code.
+# 13. OWNER GATE: only the keypad's owner may set its first code. A single player cannot
+#     become a stranger, so `/securitycraft owner <pos> stranger` (a harness command)
+#     moves the owner: a stranger's click opens no set screen, a set screen that outlives
+#     an owner change stores nothing, the owner's set works, and a stranger's
+#     `/securitycraft code` is refused while the owner's code survives.
 #
 #   tools/e2e.sh               # the scenario above
 #   SELFTEST=1 tools/e2e.sh    # phase 4 expects the door CLOSED: must exit 1
 #   SELFTEST=harming tools/e2e.sh  # phase 12 expects the missing damage: exit 1
 #   SELFTEST=nonloot tools/e2e.sh  # phase 11b expects the module to have vanished: exit 1
+#   SELFTEST=owner tools/e2e.sh    # phase 13b expects the stranger's code stored: exit 1
 #   CONTROL=1 tools/e2e.sh     # no package at all: the ids must be unknown
 #   GAME=<an unmodified game> tools/e2e.sh   # the differential: the first phase fails
 #
@@ -158,6 +164,26 @@ press_digit() {
 press_backspace() { press 0 3; }
 press_submit() { press 2 3; }
 type_code() { local digit; for digit in $(echo "$1" | grep -o .); do press_digit "$digit"; done; }
+
+# A right click on the keypad, reporting the screen it opened (or `playing` when the
+# click was refused) without failing on a refusal.
+click_keypad() { # X Y Z -> .screen
+    ctl close >/dev/null 2>&1 || true
+    ctl tp "$1.5" "$2" "$(( $3 + 2 )).5" >/dev/null
+    ctl wait 6 >/dev/null
+    ctl command "clear" >/dev/null
+    ctl wait 2 >/dev/null
+    ctl look 180 0 >/dev/null
+    ctl wait 2 >/dev/null
+    ctl look-at block "$1" "$2" "$3" south >/dev/null 2>&1 || true
+    ctl interact "$1" "$2" "$3" south >/dev/null 2>&1 || fail "the keypad did not accept the right click"
+    ctl wait 6 >/dev/null
+    ctl screen | jq -r '.screen'
+}
+
+# `/securitycraft owner` is the harness's way to put a stranger in front of a keypad:
+# a single player cannot become a second one.
+owner_cmd() { ctl chat "/securitycraft owner $1 $2 $3 $4" >/dev/null; ctl wait 4; }
 
 cleanup() {
     local status=$?
@@ -606,5 +632,84 @@ ctl close >/dev/null 2>&1 || true
 ctl command "gamemode creative @s" >/dev/null
 ctl wait 4
 
-echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes rate-limited a correct one; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke — and survived a level-side /setblock removal as a dropped item; a keypad without the module did not hurt a wrong code"
+say "phase 13: only the owner may set a keypad's first code"
+# A single-player harness cannot drive a second player, so `/securitycraft owner …
+# stranger` is the counterfactual: it puts an owner who is not the acting player in
+# front of the keypad (upstream's owner is the only gate on `verifyPasscodeSet`).
+OWN_X=$((PX-4)); OWN_Y=101; OWN_Z=$((PZ+4))
+ctl command "gamemode creative @s" >/dev/null
+ctl give securitycraft:keypad_item 1 >/dev/null
+ctl wait 6
+ctl tp "$(( OWN_X + 1 )).5" 101 "$(( OWN_Z + 2 )).5" >/dev/null
+ctl wait 6
+ctl look 180 0
+ctl select securitycraft:keypad_item >/dev/null
+ctl place "$OWN_X" "$OWN_Y" "$OWN_Z" >/dev/null || fail "the owner keypad did not place"
+ctl wait 4
+line=$(info "$OWN_X" "$OWN_Y" "$OWN_Z")
+echo "owner keypad: $line"
+[ "$(field owner "$line")" = set ] || fail "the placer did not become the owner: $line"
+[ "$(field code "$line")" = none ] || fail "the owner keypad has a code: $line"
+# (a) the set screen does not open for a stranger.
+owner_cmd "$OWN_X" "$OWN_Y" "$OWN_Z" stranger
+screen=$(click_keypad "$OWN_X" "$OWN_Y" "$OWN_Z")
+line=$(info "$OWN_X" "$OWN_Y" "$OWN_Z")
+echo "a stranger's right click opened '$screen': $line"
+[ "$screen" = playing ] || fail "a stranger opened the keypad's set screen ($screen)"
+[ "$(field status "$line")" = 7 ] || fail "the stranger's click was not refused: $line"
+[ "$(field code "$line")" = none ] || fail "a stranger's click stored a code: $line"
+# (b) a set screen that outlives the ownership change stores nothing either.
+owner_cmd "$OWN_X" "$OWN_Y" "$OWN_Z" self
+open_screen "$OWN_X" "$OWN_Y" "$OWN_Z"
+line=$(info "$OWN_X" "$OWN_Y" "$OWN_Z")
+echo "the owner's set screen: $line"
+[ "$(field mode "$line")" = set ] || fail "the owner did not get the set screen: $line"
+owner_cmd "$OWN_X" "$OWN_Y" "$OWN_Z" stranger
+type_code 1234
+press_submit
+line=$(info "$OWN_X" "$OWN_Y" "$OWN_Z")
+echo "after a stranger's set submit: $line"
+[ "$(field status "$line")" = 1 ] || fail "the stranger's set was not refused: $line"
+[ "$(field code "$line")" = none ] || fail "a stranger stored the keypad's code: $line"
+if [ "$SELFTEST" = owner ]; then
+    # Fail-capability: invert the assertion — the stranger's code must be stored.
+    [ "$(field code "$line")" = set ] || fail "SELFTEST: expected a stranger's code to be stored"
+fi
+ctl close >/dev/null 2>&1 || true
+ctl wait 4
+# (c) the owner sets it: the same digits now store the code.
+owner_cmd "$OWN_X" "$OWN_Y" "$OWN_Z" self
+open_screen "$OWN_X" "$OWN_Y" "$OWN_Z"
+type_code 1234
+press_submit
+line=$(info "$OWN_X" "$OWN_Y" "$OWN_Z")
+echo "after the owner's set submit: $line"
+[ "$(field code "$line")" = set ] || fail "the owner could not set the code: $line"
+[ "$(field mode "$line")" = check ] || fail "the set did not switch to check mode: $line"
+# (d) the harness control obeys the same rule: a stranger's `/securitycraft code` is refused,
+# and the owner's code survives untouched.
+ctl close >/dev/null 2>&1 || true
+ctl wait 4
+owner_cmd "$OWN_X" "$OWN_Y" "$OWN_Z" stranger
+ctl chat "/securitycraft code $OWN_X $OWN_Y $OWN_Z 5678" >/dev/null
+ctl wait 4
+reply=$(ctl messages 4 | jq -r '.chat[]' | grep -m1 "Only the keypad's owner" || true)
+echo "a stranger's code command answered: ${reply:-nothing}"
+[ -n "$reply" ] || fail "a stranger's /securitycraft code was not refused with a reason"
+line=$(info "$OWN_X" "$OWN_Y" "$OWN_Z")
+echo "after a stranger's code command: $line"
+[ "$(field code "$line")" = set ] || fail "a stranger's /securitycraft code replaced the owner's code: $line"
+open_screen "$OWN_X" "$OWN_Y" "$OWN_Z"
+type_code 1234
+press_submit
+line=$(info "$OWN_X" "$OWN_Y" "$OWN_Z")
+echo "the owner's code after the refused set: $line"
+[ "$(field powered "$line")" = true ] || fail "the owner's code no longer opens the keypad: $line"
+ctl close >/dev/null 2>&1 || true
+owner_cmd "$OWN_X" "$OWN_Y" "$OWN_Z" self
+ctl close >/dev/null 2>&1 || true
+ctl command "gamemode creative @s" >/dev/null
+ctl wait 4
+
+echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes rate-limited a correct one; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke — and survived a level-side /setblock removal as a dropped item; a keypad without the module did not hurt a wrong code; and only the owner may set a keypad's first code — a stranger's click opened no set screen, a set screen that outlived an owner change stored nothing, the owner set it, and a stranger's /securitycraft code was refused"
 # The cleanup trap prints the run's exit status as the last line.

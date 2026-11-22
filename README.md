@@ -5,13 +5,14 @@ against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`.
 
 - **`horizon-mod.toml`** — the only manifest and the only identity
-  (`id = "securitycraft"`, `version = "0.2.3"`, `side = "both"`, `[native]` pins).
+  (`id = "securitycraft"`, `version = "0.2.4"`, `side = "both"`, `[native]` pins).
 - **`src/runtime.rs`** — the pure rules (code shape, salted digest, verdict, entry,
-  mode, signal countdown, module permission and wrong-code damage) and their tests.
+  mode, signal countdown, who may set a code or install a module, and the wrong-code
+  damage) and their tests.
 - **`src/support.rs`** — the game glue: the block entity's saved data (code, salt,
   owner, modules), the screen's key rectangles and drawing, the menu buttons, the
-  redstone, the module install, the wrong-code damage, the module drop and the
-  harness commands.
+  redstone, the owner gate on setting a code, the module install, the wrong-code
+  damage, the module drop and the harness commands.
 - **`src/lib.rs`** — the one `impl mod_api::Hooks`, the keypad's Parts and the key
   panel item's Part (which records the owner).
 - **`assets/`, `data/`** — the carried content: the `securitycraft:keypad` block and
@@ -54,10 +55,11 @@ the launcher's `native-build`.
 `ports/tools/launcher-game.sh build securitycraft --port ports/securitycraft` compiles
 this package into the pinned Nightly and exports it; `tools/e2e.sh` then drives a real
 game with `horizon-ctl` (place, screen keys, wrong/right codes, module install, health,
-recipe, break drops, and a level-side `/setblock` removal that must keep the module). `SELFTEST=1`
-and `SELFTEST=harming` prove the assertions can
-fail, and `GAME=$CONTROL_GAME` runs the same scenario on an unmodified game, which
-fails at the first mod id. The evidence is under
+recipe, break drops, a level-side `/setblock` removal that must keep the module, and the
+owner gate on setting a code — proved by moving the owner to a stranger with the
+harness-only `/securitycraft owner`). `SELFTEST=1`, `SELFTEST=harming` and
+`SELFTEST=owner` prove the assertions can fail, and `GAME=$CONTROL_GAME` runs the same
+scenario on an unmodified game, which fails at the first mod id. The evidence is under
 `ports/_shared/evidence/securitycraft-e2e/`.
 
 The mod is **local-only** until the maintainer approves publishing

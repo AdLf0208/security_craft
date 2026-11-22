@@ -68,6 +68,18 @@ pub fn may_install(owner: Option<u128>, player: u128) -> bool {
     owner == Some(player)
 }
 
+/// Whether `player` may set a keypad's code, first or again.
+///
+/// Upstream gates every set on ownership twice: `IPasscodeProtected.verifyPasscodeSet` opens
+/// the set screen only for the block's owner (a stranger is told the block is "not set up"),
+/// and `SetPasscode.handle` refuses the hashed code unless `IOwnable.isOwnedBy(player)` — so a
+/// client-sent set from a screen that outlived the check stores nothing either. An unowned
+/// keypad (a dispenser placement, an old save) is nobody's to set.
+#[must_use]
+pub fn may_set_code(owner: Option<u128>, player: u128) -> bool {
+    owner == Some(player)
+}
+
 /// The damage a wrong submission deals, `None` without the harming module.
 ///
 /// Upstream's `IPasscodeProtected.onIncorrectPasscodeEntered`: with the harming module
@@ -678,6 +690,23 @@ mod tests {
         assert!(
             !may_install(None, 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef),
             "an unowned keypad (old save, dispenser) installs nothing"
+        );
+    }
+
+    #[test]
+    fn a_stranger_may_not_set_the_first_code() {
+        let owner = Some(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef_u128);
+        assert!(
+            may_set_code(owner, 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef),
+            "the owner sets the first code"
+        );
+        assert!(
+            !may_set_code(owner, 0xdead_beef_dead_beef_dead_beef_dead_beef),
+            "a stranger sets nothing, as upstream's verifyPasscodeSet refuses it"
+        );
+        assert!(
+            !may_set_code(None, 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef),
+            "an unowned keypad (old save, dispenser) is nobody's to set"
         );
     }
 }

@@ -28,9 +28,11 @@ ports/tools/build-slot.sh run --job sdk-sc --port ports/securitycraft --step che
   `build` packs the `.hmod`; it does **not** compile against the game — that is
   `horizon-launcher native-build . --instance <instance> --trust-native-code`.
 - **`src/runtime.rs` carries the retired bundle's rules**, plus this port's review-fix rules
-  (minimum PIN length, `Action::TooShort`, the retry `Throttle`); its sha256 is
-  `8f78aba553247a123cac17888e593b81c52c84c230d0f95de010c0b97ecb03f3` (the pre-review carried file was
-  `1b2744a909c36c98d4c78dc09a28a060709c1fa17543ffed571f5c384fb1756a`): the behaviour rules live there,
+  (minimum PIN length, `Action::TooShort`, the retry `Throttle`) and slice 3's `may_install` /
+  `wrong_code_damage` and slice 4's `may_set_code`; its sha256 is
+  `a0fca2d0a17521a5b3f928605cf975fe3866060a7db4c4d8ef6991c856e11f4e` (the pre-review carried file was
+  `1b2744a909c36c98d4c78dc09a28a060709c1fa17543ffed571f5c384fb1756a`, review #1197's was
+  `8f78aba5…03f3`, and slice 3's was `faafca14…a201`): the behaviour rules live there,
   `src/support.rs` and `src/lib.rs` only convert SDK types to theirs. New rule → a test in
   `runtime.rs`; new glue → a private fn and a test in `support.rs`.
 - Only the API the SDK publishes: `cargo horizon-mod hooks <text>` finds the exact method; never

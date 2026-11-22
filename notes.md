@@ -1097,3 +1097,150 @@ package. `src/support.rs` (`c917494b…`) carries the stash and the two hooks; `
 | the upstream copyright line travels in the package | **tested** — `unzip -p securitycraft.hmod LICENSE` (red log shows the old paraphrase) |
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port
+
+## Slice 4 — the owner gate on setting a code (2026-11-22, SDK `0a875da`) — 0.2.4
+
+**Slice.** The gap line is this port's own, slice-3 deviation 4:
+
+> **Who may set the first code is still open.** The owner is now saved, but the set screen and
+> `/securitycraft code` do not yet check it (upstream's `verifyPasscodeSet` refuses a stranger).
+
+This slice closes exactly that: one pure rule, the set path and the harness control. Class
+**content**, tier **deep**; the delivered shape is the port's existing **logic + machines** half
+(block entity, menu, screen, redstone) and it adds **no content, no renderer, no new block** — the
+rule and its two client/server call sites. Nothing else in the gap list changed.
+
+### Upstream read (this job, `Geforce132/SecurityCraft`, branch `1.21.1`, commit `c4d35b0c`)
+
+Behaviour only, from the pinned commit's files:
+
+| File | What it says |
+|---|---|
+| `api/IPasscodeProtected.java` | `verifyPasscodeSet`: a passcode already set → `true`; no passcode and `ownable.isOwnedBy(player)` → open the **set** screen; otherwise the player gets `messages.securitycraft:passcodeProtected.notSetUp` and **no screen**, and the method returns `false`. |
+| `blocks/KeypadBlock.java` (`useWithoutItem`) | powered → `PASS`; else `verifyPasscodeSet(...)` — only when it returns `true` does the deny/allow/check-screen branch run, so a stranger's click opens nothing. |
+| `api/IOwnable.java` | `isOwnedBy(Player)` → `getOwner().isTreatedTheSameAs(new Owner(player))`, so an unowned block (no owner saved) matches nobody. |
+| `network/server/SetPasscode.java` (`handle`) | the server refuses the hashed code unless `!player.isSpectator() && (!(pp instanceof IOwnable ownable) || ownable.isOwnedBy(player))` — ownership is checked **again** at the actual set, not only when the screen opens. |
+
+### Red proof (TDD, before the rule existed)
+
+`src/runtime.rs` gained `a_stranger_may_not_set_the_first_code` first, with `may_set_code`
+stubbed to `true` (the current behaviour). In a slot:
+
+```
+---- runtime::tests::a_stranger_may_not_set_the_first_code stdout ----
+
+thread 'runtime::tests::a_stranger_may_not_set_the_first_code' (1531478) panicked at src/runtime.rs:703:9:
+a stranger sets nothing, as upstream's verifyPasscodeSet refuses it
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+test result: FAILED. 41 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+Log: [`../_shared/evidence/securitycraft/slice4-red.log`](../../_shared/evidence/securitycraft/slice4-red.log).
+`may_set_code(owner, player)` then became `owner == Some(player)`; **42 passed**, 0 failed.
+
+### What the slice implements
+
+- **The rule.** `runtime::may_set_code(owner: Option<u128>, player: u128) -> bool` — upstream's
+  `IOwnable.isOwnedBy`, documented with both places upstream applies it (the set-screen entry and
+  the server-side set). It is the same predicate as `may_install` because upstream uses one
+  ownable check for both privileges; the two names stay apart because the privileges are.
+- **The set-screen entry** (`support::on_use`). A keypad with no code now opens `Mode::Set` only
+  for its owner; anyone else gets the click cancelled (`InteractionResult::Fail`, the same answer a
+  powered keypad gives — the content block opens the menu itself, so the refusal has to end the
+  click) and `status=7` in the readout. That is upstream's "not set up" answer without the chat
+  message the drawn panel cannot send.
+- **The set submit** (`support::apply_key`). `Mode::Set` + a non-owner is refused before any salt
+  or digest is written. Upstream never reaches this state (a stranger never gets the screen), but
+  the port's screen can outlive an ownership change and a menu button is client-sent, so the server
+  checks too — the same second check `SetPasscode.handle` makes. The refusal is `status=1`
+  ("Wrong code": the panel has one failure line) and stores nothing.
+- **The harness control** (`/securitycraft code`) got the same gate: only the asking player, when
+  they own the keypad, may set a code — it is a set, so it obeys `SetPasscode.handle`'s rule. A
+  refusal answers `Only the keypad's owner can set its code.`
+- **The counterfactual command** (`/securitycraft owner <pos> <self|stranger|32-hex>`, op level 2).
+  A single-player harness cannot drive a second player, so this changes the owner: `stranger`
+  writes the fixed harness UUID `deadbeefdeadbeefdeadbeefdeadbeef`, `self` the acting player's.
+  It changes the owner **only** — it does not reproduce the Universal Owner Changer's code reset,
+  because that block is not ported and the "stranger at a keypad that has a code" state is what
+  the harness needs (recorded as a deviation).
+
+### Verification (0.2.4, SDK `0a875da`, 2026-11-22)
+
+Every step ran in a `ports/tools/build-slot.sh` lease with `CARGO_INCREMENTAL=0`; logs in
+[`../_shared/evidence/securitycraft/`](../../_shared/evidence/securitycraft/). The launcher's
+native build runs one at a time machine-wide, so the game builds waited for the launcher lock.
+
+| Check | Command | Result |
+|---|---|---|
+| Red | `cargo test --offline` with the rule stubbed | **1 failed / 41 passed** (`slice4-red.log`) |
+| Tests | `cargo test --offline` | **42 passed**, 0 failed (`slice4-test.log`) |
+| Formatting | `cargo fmt --check` | exit 0 |
+| Lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, **0 warnings** (`slice4-clippy.log`) |
+| Package ×2 | `cargo horizon-mod build` twice + `cmp` | **identical** (`slice4-build-1.log`, `-2.log`); the lock is **kept** (declared `sha2`) |
+| Delivered | `securitycraft.hmod` | **59,524 B**, SHA-256 `eb42fd50fa0b81da38a083b2dd0c6b25847133d4aa8705469f15992b07679b91`, **48 entries** (incl. `Cargo.lock`) |
+| Registry check | `cargo horizon-mod check securitycraft.hmod` | `securitycraft 0.2.4 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, same SHA, **EXIT 0** (`slice4-check.log`) |
+| Pinned build | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0 (`slice4-fits.log`) |
+| Another build | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0, same artifact SHA (`slice4-fits-other.log`) |
+| Clean build of the archive | extracted 0.2.4 → `horizon-launcher native-build` | `Compiling securitycraft v0.2.4`, **`native-0a875da-e141cb80db51 built`**, EXIT 0 (`slice4-clean-build.log`) |
+| Gate | `python3 ports/tools/verify-sdk-package.py securitycraft` | **1/1** (`slice4-verify-sdk-package.log`) |
+| In game PASS | launcher-built game carrying 0.2.4 | **PASS + `EXIT:0`** (`securitycraft-e2e/e2e-launcher.log`) |
+| Control | the same scenario on the unmodified Nightly (`GAME=$CONTROL_GAME`) | **`EXIT:1`** at phase 1 (`e2e-control.log`) |
+| SELFTEST (door) | `SELFTEST=1` | **`EXIT:1`**, "expected the door OPEN after a wrong code" (`e2e-selftest.log`) |
+| SELFTEST (owner) | `SELFTEST=owner` | **`EXIT:1`**, "expected a stranger's code to be stored" (`e2e-selftest-owner.log`) |
+| Log checker | `check-e2e-logs.py securitycraft-e2e --strict` | `logs=7 ok=7`, exit 0 (`slice4-check-e2e-logs.log`) |
+
+Phase 13 quoted from `e2e-launcher.log`:
+
+```
+owner keypad: securitycraft keypad 18 101 4 code=none entered= mode=check signal=0 powered=false status=0 modules=none owner=set door=none
+a stranger's right click opened 'playing': securitycraft keypad 18 101 4 code=none entered= mode=check signal=0 powered=false status=7 modules=none owner=set door=none
+the owner's set screen: securitycraft keypad 18 101 4 code=none entered= mode=set signal=0 powered=false status=0 modules=none owner=set door=none
+after a stranger's set submit: securitycraft keypad 18 101 4 code=none entered= mode=set signal=0 powered=false status=1 modules=none owner=set door=none
+after the owner's set submit: securitycraft keypad 18 101 4 code=set entered= mode=check signal=0 powered=false status=2 modules=none owner=set door=none
+a stranger's code command answered: Only the keypad's owner can set its code.
+after a stranger's code command: securitycraft keypad 18 101 4 code=set entered= mode=check signal=0 powered=false status=2 modules=none owner=set door=none
+the owner's code after the refused set: securitycraft keypad 18 101 4 code=set entered= mode=check signal=58 powered=true status=3 modules=none owner=set door=none
+PASS: …and only the owner may set a keypad's first code — a stranger's click opened no set screen, a set screen that outlived an owner change stored nothing, the owner set it, and a stranger's /securitycraft code was refused
+EXIT:0
+```
+
+`src/runtime.rs` (`a0fca2d0…`), `src/support.rs` (`d0db7332…`) and `src/lib.rs` (`45f41e01…`)
+are byte-identical inside the package (`slice4-packed-src.log`); the rule is the only change to
+`runtime.rs`, the three call sites and the owner command are the glue.
+
+The counterfactual is the only way a single-player harness can stand a stranger in front of the
+keypad: `/securitycraft owner … stranger` moves the owner, and each leg's assertion would pass
+vacuously if the command did nothing (`may_set_code` would then find the acting player the owner
+and store the code), so the legs are not self-satisfying. `SELFTEST=owner` inverts the refused-set
+assertion on the delivered build and fails exactly there.
+
+### Coverage after this slice
+
+| Family | Status |
+|---|---|
+| a stranger's right click on a code-less keypad | **tested** — phase 13a: `screen=playing`, `status=7`, `code=none` |
+| a set submit from a screen that outlived an owner change | **tested** — phase 13b: `status=1`, `code=none` |
+| the owner sets the first code | **tested** — phase 13c: `code=set`, `mode=check` |
+| `/securitycraft code` by a stranger | **tested** — phase 13d: refused with `Only the keypad's owner…`, the owner's code still opens the keypad (`powered=true`) |
+| the rule itself (owner / stranger / unowned) | **unit test** `a_stranger_may_not_set_the_first_code` |
+| allowlist / denylist modules, and their "allowed → open without a code" branch | **not ported** — the next slice |
+| the disguise / smart modules, the `disabled` option, waterlogging, ceiling/floor mounting, the passcode chest/barrel/furnace/smoker, keypad door and trapdoor, the reinforced-block family, cameras, mines, lasers, scanners, the alarm, display cases, the frame, the door's in-world recipe, the owner-only breaking speed, the config file | **not ported** — unchanged from slice 1/3 (see the gap list above) |
+
+### Deviations recorded by this slice
+
+1. **A refused set reads `status=1` ("Wrong code").** Upstream never shows a stranger the set
+   screen, so it never needs a refusal status; the port's screen can outlive the entry check, and
+   the drawn panel has one failure line. No code is written, and `/securitycraft info` reports the
+   truth (`code=none`).
+2. **`/securitycraft owner` is harness-only and changes the owner alone.** It stands in for a
+   second player; upstream's Owner Changer also resets the passcode (`onOwnerChanged`), which the
+   harness deliberately does not do so that "a stranger at a keypad that has a code" is reachable.
+3. **An unowned keypad is nobody's to set.** A keypad placed by a dispenser, or saved by a build
+   before slice 3, has no owner and can no longer have a code set — faithful to `isOwnedBy` on an
+   ownerless block, and a behaviour change for such saves (break and replace it with a placer).
+4. **No "not set up" chat line** for the stranger: the port's panel is drawn by the mod and the
+   refusal is `status=7` in the readout rather than a `messages.securitycraft` line (the mod's
+   message keys are not carried).
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port, rust-review

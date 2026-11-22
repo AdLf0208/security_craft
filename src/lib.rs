@@ -1,11 +1,12 @@
 //! SecurityCraft for Horizon: the keypad, the reinforced door and the harming module.
 //!
 //! The rules — the code's shape, the salted digest, the verdict of a submitted entry, the
-//! screen mode, the key-to-button map, the signal countdown, who may install a module and the
-//! damage a wrong code deals — live in [`runtime`], which knows nothing about the game and
-//! carries its own tests. [`support`] is the game glue, and this file is the one
-//! `impl Hooks`: the keypad's [Parts](mod_api::BlockEntityPart), the key panel item's part,
-//! the module drop, and the `/securitycraft` harness commands.
+//! screen mode, the key-to-button map, the signal countdown, who owns the keypad (and so who
+//! may set its code or install a module) and the damage a wrong code deals — live in
+//! [`runtime`], which knows nothing about the game and carries its own tests. [`support`] is
+//! the game glue, and this file is the one `impl Hooks`: the keypad's
+//! [Parts](mod_api::BlockEntityPart), the key panel item's part, the module drop, and the
+//! `/securitycraft` harness commands.
 //!
 //! A keypad is a mod block entity with a menu; a reinforced door beside it is carried content
 //! (a vanilla iron door) that opens on the keypad's redstone signal and closes when the signal
@@ -160,14 +161,18 @@ impl Hooks for Mod {
         support::set_harming_module_item(harming_module);
     }
 
-    /// `/securitycraft info|code`: the harness controls this slice's e2e needs (a headless
-    /// harness cannot type into the screen).
+    /// `/securitycraft info|code|owner`: the harness controls this slice's e2e needs (a headless
+    /// harness cannot type into the screen, and a single player cannot become a stranger).
     fn register_commands(&self, _host: &mut dyn ServerHost, event: &mut RegisterCommandsEvent<'_>) {
         event
             .commands
             .push(mod_api::Command::new("securitycraft info <pos:block_pos>"));
         event.commands.push(mod_api::Command::op(
             "securitycraft code <pos:block_pos> <code:word>",
+            2,
+        ));
+        event.commands.push(mod_api::Command::op(
+            "securitycraft owner <pos:block_pos> <who:word>",
             2,
         ));
     }

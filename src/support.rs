@@ -33,7 +33,8 @@ use mod_api::{
 
 use crate::runtime::{
     Action, Button, DEFAULT_SIGNAL_TICKS, Entry, Mode, Throttle, after_submit, button,
-    facing_from_yaw, hash_code, may_install, new_salt, tick_signal, valid_code, wrong_code_damage,
+    facing_from_yaw, hash_code, may_install, may_set_code, new_salt, tick_signal, valid_code,
+    wrong_code_damage,
 };
 
 /// The keypad block; its item (`securitycraft:keypad_item`) places it.
@@ -98,6 +99,9 @@ const STATUS_EMPTY: i32 = 4;
 /// The screen's "too short / locked out" answers.
 const STATUS_TOO_SHORT: i32 = 5;
 const STATUS_LOCKED: i32 = 6;
+/// The screen's "not your keypad" answer. A stranger's set screen never opens
+/// (`may_set_code`), so this status is read from `/securitycraft info`, not drawn.
+const STATUS_NOT_OWNER: i32 = 7;
 
 /// The screen's button grid: 1-9, then backspace, 0 and submit. The same
 /// rectangles are hit-tested by `screen_click` and drawn by `screen_draw`, both
@@ -418,6 +422,18 @@ pub(crate) fn on_use(
     } else {
         Mode::Set
     };
+    // A keypad without a code shows its set screen to its owner alone: upstream's
+    // `verifyPasscodeSet` answers a stranger with "not set up" and opens nothing. The
+    // content block opens the menu itself, so the refusal has to end the click.
+    if mode == Mode::Set && !may_set_code(owner_of(&data), click.player) {
+        set_int(&mut data, KEY_STATUS, STATUS_NOT_OWNER);
+        set_int(&mut data, KEY_MODE, Mode::Check.code());
+        drop_key(&mut data, KEY_ENTRY);
+        let slots = data_slots(&*host, level, pos, &data, 0);
+        let _ = entity.replace_data(host, data);
+        let _ = entity.set_data_slots(host, slots);
+        return Some(InteractionResult::Fail);
+    }
     set_int(&mut data, KEY_MODE, mode.code());
     set_int(&mut data, KEY_STATUS, STATUS_NONE);
     drop_key(&mut data, KEY_ENTRY);
@@ -670,6 +686,19 @@ fn apply_key(
                 entry.clear();
                 store_entry(session, &entry);
                 set_int(nbt, KEY_STATUS, STATUS_LOCKED);
+                return None;
+            }
+            // A set is the owner's alone. Upstream checks ownership twice — when the set
+            // screen opens (`verifyPasscodeSet`) and again on the server packet
+            // (`SetPasscode.handle`), so a screen that outlived the check stores nothing.
+            // Here the screen can outlive it (the owner may change under an open menu) and
+            // a menu button is client-sent, so the server refuses it too. The panel has one
+            // failure line, so a refused set reads as a failed attempt (status 1, "Wrong
+            // code"); no code is written.
+            if mode == Mode::Set && !may_set_code(owner_of(nbt), session.player) {
+                entry.clear();
+                store_entry(session, &entry);
+                set_int(nbt, KEY_STATUS, STATUS_WRONG);
                 return None;
             }
             let salt = string(nbt, KEY_SALT).unwrap_or_default();
@@ -1020,12 +1049,15 @@ fn keypad_info(
 
 /// `/securitycraft code <pos> <digits>`: sets a code without the screen. It
 /// exists because a headless harness cannot type into the screen, and is
-/// recorded as a harness addition, not as gameplay.
+/// recorded as a harness addition, not as gameplay. It is a *set*, so it obeys
+/// the same owner rule as the set screen: upstream's `SetPasscode.handle`
+/// refuses a player who does not own the block.
 fn set_code(
     host: &mut dyn ServerHost,
     level: LevelRef,
     pos: [i32; 3],
     code: &str,
+    asking: Option<u128>,
 ) -> Result<String, String> {
     if !valid_code(code) {
         return Err("A code is four to twenty digits.".to_owned());
@@ -1033,17 +1065,20 @@ fn set_code(
     if block_at(&*host, level, pos) != KEYPAD {
         return Err("No keypad at that position.".to_owned());
     }
-    let salt = fresh_salt(host).ok_or_else(|| "No keypad at that position.".to_owned())?;
-    let digest = hash_code(code, &salt).unwrap_or_default();
-    if let Some(dimension) = level.dimension().id(&*host) {
-        clear_keypad(&dimension, pos);
-    }
     let entity = host
         .block_entity(level, pos)
         .ok_or_else(|| "No keypad at that position.".to_owned())?;
     let mut data = entity
         .data(&*host)
         .ok_or_else(|| "No keypad at that position.".to_owned())?;
+    if !asking.is_some_and(|player| may_set_code(owner_of(&data), player)) {
+        return Err("Only the keypad's owner can set its code.".to_owned());
+    }
+    let salt = fresh_salt(host).ok_or_else(|| "No keypad at that position.".to_owned())?;
+    let digest = hash_code(code, &salt).unwrap_or_default();
+    if let Some(dimension) = level.dimension().id(&*host) {
+        clear_keypad(&dimension, pos);
+    }
     set_string(&mut data, KEY_SALT, &salt);
     set_string(&mut data, KEY_CODE, &digest);
     drop_key(&mut data, KEY_ENTRY);
@@ -1056,6 +1091,63 @@ fn set_code(
         .map_err(|_| "No keypad at that position.".to_owned())?;
     let _ = entity.set_data_slots(host, slots);
     Ok("Code set.".to_owned())
+}
+
+/// The UUID `/securitycraft owner … stranger` writes: no player has it, so the
+/// keypad has an owner who can never act. A harness value, not gameplay.
+const HARNESS_STRANGER: u128 = 0xdead_beef_dead_beef_dead_beef_dead_beef;
+
+/// What `/securitycraft owner` says when the argument is neither a name it knows
+/// nor a 32-digit UUID.
+const OWNER_USAGE: &str = "Usage: /securitycraft owner <x> <y> <z> <self|stranger>";
+
+/// `/securitycraft owner <pos> <self|stranger>`: changes a keypad's owner.
+///
+/// Upstream's owner changes through the Universal Owner Changer, and the keypad's
+/// `onOwnerChanged` clears the passcode and its salt with it. This command exists
+/// because a single-player harness cannot drive a second player, so the owner is the
+/// only way to put a stranger in front of a keypad; it is a harness addition, not
+/// gameplay, and is recorded as such.
+fn set_owner(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    who: &str,
+    asking: Option<u128>,
+) -> Result<String, String> {
+    let owner = match who {
+        "self" => asking.ok_or_else(|| "No player to make the owner.".to_owned())?,
+        "stranger" => HARNESS_STRANGER,
+        hex if hex.len() == 32 => {
+            u128::from_str_radix(hex, 16).map_err(|_| OWNER_USAGE.to_owned())?
+        }
+        _ => return Err(OWNER_USAGE.to_owned()),
+    };
+    if block_at(&*host, level, pos) != KEYPAD {
+        return Err("No keypad at that position.".to_owned());
+    }
+    let entity = host
+        .block_entity(level, pos)
+        .ok_or_else(|| "No keypad at that position.".to_owned())?;
+    let mut data = entity
+        .data(&*host)
+        .ok_or_else(|| "No keypad at that position.".to_owned())?;
+    set_string(&mut data, KEY_OWNER, &format!("{owner:032x}"));
+    // The command changes the owner and nothing else: upstream's Owner Changer also
+    // resets the passcode (`onOwnerChanged`), but that block is not ported, and keeping
+    // the code is what makes the "a stranger stands at a keypad that has a code" state
+    // reachable for this harness. The screen's `mode` is the open client's intent —
+    // upstream keeps it in the packet, not the block — so it is left alone too: a set
+    // screen that outlives this change is exactly what the submit check refuses.
+    let slots = data_slots(&*host, level, pos, &data, 0);
+    entity
+        .replace_data(host, data)
+        .map_err(|_| "No keypad at that position.".to_owned())?;
+    let _ = entity.set_data_slots(host, slots);
+    if let Some(dimension) = level.dimension().id(&*host) {
+        clear_keypad(&dimension, pos);
+    }
+    keypad_info(host, level, pos, asking).ok_or_else(|| "No keypad at that position.".to_owned())
 }
 
 /// Answers a `/securitycraft` invocation, or `None` when it is not one.
@@ -1101,7 +1193,24 @@ pub(crate) fn command(
                 .list_levels()
                 .into_iter()
                 .find(|level| level.dimension() == invocation.dimension)?;
-            Some(set_code(host, level, pos, code).unwrap_or_else(|line| line))
+            Some(set_code(host, level, pos, code, asking).unwrap_or_else(|line| line))
+        }
+        ["securitycraft", "owner"] => {
+            let Some(mod_api::CommandArgumentValue::BlockPos(pos)) = invocation.argument("pos")
+            else {
+                return Some(OWNER_USAGE.to_owned());
+            };
+            let pos = *pos;
+            let Some(mod_api::CommandArgumentValue::String(who)) = invocation.argument("who")
+            else {
+                return Some(OWNER_USAGE.to_owned());
+            };
+            let level = host
+                .levels()
+                .list_levels()
+                .into_iter()
+                .find(|level| level.dimension() == invocation.dimension)?;
+            Some(set_owner(host, level, pos, who, asking).unwrap_or_else(|line| line))
         }
         _ => None,
     }
