@@ -13,8 +13,11 @@
 // SHA-256 digest: the same shape (a random salt per keypad, a one-way digest,
 // the plain digits never saved) without a key-derivation loop on the server
 // thread. Recorded as a deliberate deviation.
-
-use sha2::{Digest, Sha256};
+//
+// The digest is computed by [`sha256`] below, this port's own implementation:
+// the registry refuses a package that declares any dependency but the SDK
+// (`tools/native-subset/src/manifests.rs`, R9), so a hash crate cannot travel
+// with a native `.hmod`.
 
 /// The shortest code a keypad accepts. A one-digit PIN is a 10-value secret: five
 /// guesses reach 50%, so the server refuses anything shorter than four digits (a
@@ -118,11 +121,9 @@ pub fn hash_code(code: &str, salt_hex: &str) -> Option<String> {
     if !valid_code(code) {
         return None;
     }
-    let salt = decode_hex(salt_hex)?;
-    let mut digest = Sha256::new();
-    digest.update(&salt);
-    digest.update(code.as_bytes());
-    Some(encode_hex(&digest.finalize()))
+    let mut message = decode_hex(salt_hex)?;
+    message.extend_from_slice(code.as_bytes());
+    Some(encode_hex(&sha256(&message)))
 }
 
 /// A salt as the hex a keypad saves, from the bytes the level's random gave.
@@ -371,6 +372,163 @@ fn hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
+/// SHA-256 of `message` (FIPS 180-4), this port's own code.
+///
+/// The keypad's digest used to come from the `sha2` crate; the registry refuses
+/// any package that declares a dependency other than the SDK
+/// (`tools/native-subset/src/manifests.rs`, R9), so the hash lives here instead.
+/// It is written from the standard — the round constants, the compression
+/// function and the padding — not translated from a crate.
+///
+/// Padding: one `0x80` byte, zeros until the length is 56 modulo 64, then the
+/// message's length in bits as a big-endian `u64` — so a message of 55 bytes
+/// still fits one block and 56 bytes takes two.
+fn sha256(message: &[u8]) -> [u8; 32] {
+    let mut state = SHA256_INITIAL;
+    let bit_length = (message.len() as u64).wrapping_mul(8);
+    let mut padded = Vec::with_capacity(message.len() + 72);
+    padded.extend_from_slice(message);
+    padded.push(0x80);
+    while padded.len() % 64 != 56 {
+        padded.push(0);
+    }
+    padded.extend_from_slice(&bit_length.to_be_bytes());
+    for block in padded.chunks_exact(64) {
+        sha256_compress(&mut state, block);
+    }
+    let mut digest = [0u8; 32];
+    for (word, chunk) in state.iter().zip(digest.chunks_exact_mut(4)) {
+        chunk.copy_from_slice(&word.to_be_bytes());
+    }
+    digest
+}
+
+/// The SHA-256 round constants: the first 32 bits of the fractional parts of the
+/// cube roots of the first 64 primes (FIPS 180-4, §4.2.2).
+const SHA256_K: [u32; 64] = [
+    0x428a_2f98,
+    0x7137_4491,
+    0xb5c0_fbcf,
+    0xe9b5_dba5,
+    0x3956_c25b,
+    0x59f1_11f1,
+    0x923f_82a4,
+    0xab1c_5ed5,
+    0xd807_aa98,
+    0x1283_5b01,
+    0x2431_85be,
+    0x550c_7dc3,
+    0x72be_5d74,
+    0x80de_b1fe,
+    0x9bdc_06a7,
+    0xc19b_f174,
+    0xe49b_69c1,
+    0xefbe_4786,
+    0x0fc1_9dc6,
+    0x240c_a1cc,
+    0x2de9_2c6f,
+    0x4a74_84aa,
+    0x5cb0_a9dc,
+    0x76f9_88da,
+    0x983e_5152,
+    0xa831_c66d,
+    0xb003_27c8,
+    0xbf59_7fc7,
+    0xc6e0_0bf3,
+    0xd5a7_9147,
+    0x06ca_6351,
+    0x1429_2967,
+    0x27b7_0a85,
+    0x2e1b_2138,
+    0x4d2c_6dfc,
+    0x5338_0d13,
+    0x650a_7354,
+    0x766a_0abb,
+    0x81c2_c92e,
+    0x9272_2c85,
+    0xa2bf_e8a1,
+    0xa81a_664b,
+    0xc24b_8b70,
+    0xc76c_51a3,
+    0xd192_e819,
+    0xd699_0624,
+    0xf40e_3585,
+    0x106a_a070,
+    0x19a4_c116,
+    0x1e37_6c08,
+    0x2748_774c,
+    0x34b0_bcb5,
+    0x391c_0cb3,
+    0x4ed8_aa4a,
+    0x5b9c_ca4f,
+    0x682e_6ff3,
+    0x748f_82ee,
+    0x78a5_636f,
+    0x84c8_7814,
+    0x8cc7_0208,
+    0x90be_fffa,
+    0xa450_6ceb,
+    0xbef9_a3f7,
+    0xc671_78f2,
+];
+
+/// The SHA-256 initial hash value: the first 32 bits of the fractional parts of
+/// the square roots of the first 8 primes (FIPS 180-4, §5.3.3).
+const SHA256_INITIAL: [u32; 8] = [
+    0x6a09_e667,
+    0xbb67_ae85,
+    0x3c6e_f372,
+    0xa54f_f53a,
+    0x510e_527f,
+    0x9b05_688c,
+    0x1f83_d9ab,
+    0x5be0_cd19,
+];
+
+/// One SHA-256 block: extend its sixteen words to sixty-four, then run the
+/// sixty-four rounds over the working variables.
+fn sha256_compress(state: &mut [u32; 8], block: &[u8]) {
+    let mut schedule = [0u32; 64];
+    for (word, chunk) in schedule.iter_mut().zip(block.chunks_exact(4)) {
+        *word = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    for index in 16..64 {
+        let thirteen_back = schedule[index - 15];
+        let two_back = schedule[index - 2];
+        let sigma0 =
+            thirteen_back.rotate_right(7) ^ thirteen_back.rotate_right(18) ^ (thirteen_back >> 3);
+        let sigma1 = two_back.rotate_right(17) ^ two_back.rotate_right(19) ^ (two_back >> 10);
+        schedule[index] = schedule[index - 16]
+            .wrapping_add(sigma0)
+            .wrapping_add(schedule[index - 7])
+            .wrapping_add(sigma1);
+    }
+    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
+    for (&constant, &word) in SHA256_K.iter().zip(schedule.iter()) {
+        let sigma1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+        let choose = (e & f) ^ (!e & g);
+        let temp1 = h
+            .wrapping_add(sigma1)
+            .wrapping_add(choose)
+            .wrapping_add(constant)
+            .wrapping_add(word);
+        let sigma0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+        let majority = (a & b) ^ (a & c) ^ (b & c);
+        let temp2 = sigma0.wrapping_add(majority);
+        h = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(temp1);
+        d = c;
+        c = b;
+        b = a;
+        a = temp1.wrapping_add(temp2);
+    }
+    for (slot, value) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+        *slot = slot.wrapping_add(value);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,6 +615,33 @@ mod tests {
         assert_eq!(
             hash_code("1234", SALT).as_deref(),
             Some("bad0b4f7cae08eb7c1b5acc763a8ed25242e2c9173e81f3f624b1fa5303cf6ce")
+        );
+    }
+
+    #[test]
+    fn the_hash_matches_the_standard_vectors() {
+        // The empty message and the 55/56-byte padding boundary: 55 bytes leave
+        // room for the `0x80` and the 8-byte bit length in one block, 56 do not,
+        // so a padding bug shows up on exactly one of them.
+        assert_eq!(
+            encode_hex(&sha256(b"")),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "the empty message"
+        );
+        assert_eq!(
+            encode_hex(&sha256(&[b'a'; 55])),
+            "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318",
+            "55 bytes: one padded block"
+        );
+        assert_eq!(
+            encode_hex(&sha256(&[b'a'; 56])),
+            "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a",
+            "56 bytes: the bit length does not fit the first block"
+        );
+        assert_eq!(
+            encode_hex(&sha256(&[b'a'; 1000])),
+            "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3",
+            "1000 bytes: many blocks"
         );
     }
 

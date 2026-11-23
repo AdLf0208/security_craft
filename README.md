@@ -5,10 +5,13 @@ against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`.
 
 - **`horizon-mod.toml`** — the only manifest and the only identity
-  (`id = "securitycraft"`, `version = "0.2.4"`, `side = "both"`, `[native]` pins).
+  (`id = "securitycraft"`, `version = "0.2.5"`, `side = "both"`, `[native]` pins).
 - **`src/runtime.rs`** — the pure rules (code shape, salted digest, verdict, entry,
   mode, signal countdown, who may set a code or install a module, and the wrong-code
-  damage) and their tests.
+  damage) and their tests. It also carries the port's **own SHA-256**, because the
+  registry refuses a package that declares any dependency but the SDK
+  (`tools/native-subset/src/manifests.rs`, R9) — the digest crate cannot travel with a
+  native `.hmod`.
 - **`src/support.rs`** — the game glue: the block entity's saved data (code, salt,
   owner, modules), the screen's key rectangles and drawing, the menu buttons, the
   redstone, the owner gate on setting a code, the module install, the wrong-code
@@ -21,9 +24,9 @@ against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
   `securitycraft:incorrect_passcode` damage type), the jar's blockstates, models,
   textures, loot, recipes, tag and lang, plus the keypad's content menu type.
 - **`securitycraft.hmod`** — the delivered package (built by
-  `cargo horizon-mod build`, copied out of `target/`). It **packs `Cargo.lock`**: this is the one
-  package in the campaign that declares a registry crate (`sha2`), and the launcher's clean build
-  (`native-build`) refuses a package that declares one without its lock.
+  `cargo horizon-mod build`, copied out of `target/`). Its only dependency is the SDK's
+  `horizon-mod-api`, so it **packs no `Cargo.lock`**: R10 accepts a lock only as the
+  previous release's, and an SDK-only package needs none.
 - **`FINDINGS.md`** — the upstream behaviour read; **`notes.md`** — scope, hook map,
   deviations, verification and gaps.
 
@@ -55,12 +58,13 @@ the launcher's `native-build`.
 `ports/tools/launcher-game.sh build securitycraft --port ports/securitycraft` compiles
 this package into the pinned Nightly and exports it; `tools/e2e.sh` then drives a real
 game with `horizon-ctl` (place, screen keys, wrong/right codes, module install, health,
-recipe, break drops, a level-side `/setblock` removal that must keep the module, and the
+recipe, break drops, a level-side `/setblock` removal that must keep the module, the
 owner gate on setting a code — proved by moving the owner to a stranger with the
-harness-only `/securitycraft owner`). `SELFTEST=1`, `SELFTEST=harming` and
-`SELFTEST=owner` prove the assertions can fail, and `GAME=$CONTROL_GAME` runs the same
-scenario on an unmodified game, which fails at the first mod id. The evidence is under
-`ports/_shared/evidence/securitycraft-e2e/`.
+harness-only `/securitycraft owner` — and a quit-and-relaunch leg where the code stored
+before the restart still opens the keypad). `SELFTEST=1`, `SELFTEST=harming`,
+`SELFTEST=owner` and `SELFTEST=relaunch` prove the assertions can fail, and
+`GAME=$CONTROL_GAME` runs the same scenario on an unmodified game, which fails at the
+first mod id. The evidence is under `ports/_shared/evidence/securitycraft-e2e/`.
 
 The mod is **local-only** until the maintainer approves publishing
 (ARCHITECTURE.md §8); the upstream jar and its assets are MIT.

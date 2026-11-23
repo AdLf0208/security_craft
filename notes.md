@@ -1244,3 +1244,150 @@ assertion on the delivered build and fails exactly there.
    message keys are not carried).
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port, rust-review
+
+## R9 — the hash is the port's own code (2026-11-23, SDK `0a875da`) — 0.2.5
+
+**Why this slice.** The registry refuses any package whose `Cargo.toml` declares a dependency other
+than the SDK (`tools/native-subset/src/manifests.rs`, R9; `var/autopilot/PLAN.md` "R9", read
+2026-11-23). This package declared `sha2 = "0.10"` for the keypad's salted digest and packed the
+resolved `Cargo.lock`; #1800 (actuallyadditions) was refused at `495701cf` for `serde_json`, so the
+rule is enforced, not advisory. The job is a **dependency removal, not a feature**: the keypad,
+the reinforced door, the harming module and the owner gate behave exactly as in 0.2.4. Class
+**content**, tier **deep** — the delivered shape does not change.
+
+**The decision: implement SHA-256 in `src/runtime.rs`, not drop the digest.** The alternatives were
+a weaker hash (a plaintext-equivalent secret in the save) or a new id/kind (impossible: this entry is
+published). A hash is 60 lines of well-specified arithmetic, so the port carries its own: `const
+SHA256_K` (the 64 round constants), `SHA256_INITIAL`, `sha256` (padding and block loop) and
+`sha256_compress` (message schedule and 64 rounds), written from FIPS 180-4, private to the rules
+module. No `unsafe` (R15), no `extern` (R16), no macros (R17) — plain functions over `[u8]`/`[u32]`.
+`hash_code` now feeds `salt ‖ digits` to it, so the saved bytes (a hex digest plus the salt) and the
+NBT shape are unchanged: an existing keypad's code still opens it, which the relaunch leg proves.
+
+**The policy is dead.** "Declare a registry dependency and pack its lock" was right for the
+launcher's clean build (0.2.3's review asked for exactly that) and is **dead for publishing**: R9
+refuses the dependency, and R10 accepts a lock only as the previous release's. An SDK-only package
+ships none. `Cargo.toml` now ends at the SDK path dependency — no `[workspace]` either (R9 refuses
+it even empty).
+
+### Red (TDD, before the primitive existed)
+
+`sha2` was removed from `Cargo.toml`, `hash_code` was pointed at a `sha256` stub returning
+`[0u8; 32]`, and the new padding vectors were added. In a build slot:
+
+```
+---- runtime::tests::the_digest_is_sha256_of_the_salt_then_the_code stdout ----
+
+thread 'runtime::tests::the_digest_is_sha256_of_the_salt_then_the_code' (3262368) panicked at src/runtime.rs:475:9:
+assertion `left == right` failed
+  left: Some("0000000000000000000000000000000000000000000000000000000000000000")
+ right: Some("bad0b4f7cae08eb7c1b5acc763a8ed25242e2c9173e81f3f624b1fa5303cf6ce")
+
+---- runtime::tests::the_hash_matches_the_standard_vectors stdout ----
+
+thread 'runtime::tests::the_hash_matches_the_standard_vectors' (3262370) panicked at src/runtime.rs:486:9:
+assertion `left == right` failed: the empty message
+  left: "0000000000000000000000000000000000000000000000000000000000000000"
+ right: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+test result: FAILED. 36 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+Log: [`../_shared/evidence/securitycraft/r9-red.log`](../../_shared/evidence/securitycraft/r9-red.log).
+After the primitive was written: **43 passed**, 0 failed (`r9-test.log`, `sdk-test.log`).
+
+### Test vectors (the digest rule, in `runtime.rs`)
+
+| Message | Expected SHA-256 |
+|---|---|
+| `bytes.fromhex("000102…0f") ‖ b"1234"` (the existing digest vector) | `bad0b4f7cae08eb7c1b5acc763a8ed25242e2c9173e81f3f624b1fa5303cf6ce` |
+| the empty message | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| 55 × `a` (one padded block: the `0x80` and the 8-byte length still fit) | `9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318` |
+| 56 × `a` (the length no longer fits; a second block is forced) | `b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a` |
+| 1000 × `a` (many blocks) | `41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3` |
+
+The same code under `OTHER_SALT` keeps its vector (`3c98a0ee…cf43`), so the salt is still part of
+the message, not of the state.
+
+### Verification (0.2.5, SDK `0a875da`, 2026-11-23)
+
+Every step ran in a `ports/tools/build-slot.sh` lease with `CARGO_INCREMENTAL=0`; the SDK and
+launcher steps ran locally (`BUILD_LOCAL=1`, the remote box has no `cargo-horizon-mod`). Logs are in
+[`../_shared/evidence/securitycraft/`](../../_shared/evidence/securitycraft/) and
+[`../_shared/evidence/securitycraft-e2e/`](../../_shared/evidence/securitycraft-e2e/).
+
+| Check | Command | Result |
+|---|---|---|
+| Red | `cargo test --offline` with the primitive stubbed | **36 passed / 7 failed** (`r9-red.log`) |
+| Tests | `cargo test --offline` | **43 passed**, 0 failed (`r9-test.log`, `sdk-test.log`) |
+| Formatting | `cargo fmt --check` | exit 0 |
+| Lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, **0 warnings** (`r9-clippy.log`) |
+| Package ×2 | `rm -f Cargo.lock && cargo horizon-mod build` twice + `cmp` | **identical** (`r9-build-1.log`, `-2.log`) |
+| Delivered | `securitycraft.hmod` | **59,040 B**, SHA-256 `7c93b68dc46f2ab00d533830c222795527abdb456942f8fc8fae84e72c074dc8`, **47 entries**, **no `Cargo.lock`** |
+| Registry check | `cargo horizon-mod check securitycraft.hmod` | `securitycraft 0.2.5 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, same SHA, **EXIT 0** (`r9-check.log`) |
+| Pinned build | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0, `artifact checked: 59040 bytes, sha256 7c93b68d…` (`r9-fits.log`) |
+| Another build | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0, same artifact SHA (`r9-fits-other.log`) |
+| Launcher build | `launcher-game.sh build securitycraft` | `Compiling securitycraft (1 of 1)`; **no "Native mod adds N registry crates" line**; `native-0a875da-2be1c7ac3bc8 built` (`r9-launcher-build.log`) |
+| Clean build of the archive | extracted 0.2.5 → `horizon-launcher native-build` | `Compiling securitycraft (1 of 1)`, `native-0a875da-7094b229ec0f built`, EXIT 0 (`r9-clean-build.log`) |
+| Gate | `python3 ports/tools/verify-sdk-package.py securitycraft` | **1/1**, incl. `SDK-only dependencies (R9)`, `no packed Cargo.lock`, `package matches the tree` (`r9-verify-sdk-package.log`) |
+| In game PASS | launcher-built game carrying 0.2.5 | **PASS + `EXIT:0`**, incl. phase 14 (`securitycraft-e2e/e2e-launcher.log`) |
+| Control (differential) | the same scenario on the unmodified Nightly (`GAME=$CONTROL_GAME`) | **`EXIT:1`**, "the game refused securitycraft:iron_door_reinforced" (`e2e-control.log`) |
+| SELFTEST (door) | `SELFTEST=1` | **`EXIT:1`** (`e2e-selftest.log`) |
+| SELFTEST (owner) | `SELFTEST=owner` | **`EXIT:1`** at 13b (`e2e-selftest-owner.log`) |
+| SELFTEST (relaunch) | `SELFTEST=relaunch` | **`EXIT:1`** at 14, "expected the relaunch to lose the stored digest" (`e2e-selftest-relaunch.log`) |
+| SELFTEST (harming) | `SELFTEST=harming` | **`EXIT:1`** at 12 (`e2e-selftest-harming.log`) |
+| SELFTEST (level removal) | `SELFTEST=nonloot` | **`EXIT:1`** at 11b (`e2e-selftest-nonloot.log`) |
+| Log checker | `check-e2e-logs.py securitycraft-e2e --strict` | `logs=7 ok=7`, exit 0 |
+| Recipe types | `check-recipe-types.py securitycraft` | `securitycraft: ok`, exit 0 |
+
+### The digest survives a restart (new phase 14)
+
+`tools/e2e.sh` now quits the game and relaunches the **same** world and game dir, then types the
+code stored before the restart. Quoted from `e2e-launcher.log`:
+
+```
+== phase 14: a code set before a restart still opens the same keypad after it ==
+keypad before the relaunch: securitycraft keypad 13 101 -6 code=set entered= mode=check signal=0 powered=false status=3 modules=none owner=set door=12,101,-6:closed
+keypad after the relaunch: securitycraft keypad 13 101 -6 code=set entered= mode=check signal=0 powered=false status=3 modules=none owner=set door=12,101,-6:closed
+a wrong code after the relaunch: securitycraft keypad 13 101 -6 code=set entered= mode=check signal=0 powered=false status=1 modules=none owner=set door=12,101,-6:closed
+the right code after the relaunch: securitycraft keypad 13 101 -6 code=set entered= mode=check signal=58 powered=true status=3 modules=none owner=set door=12,101,-6:open
+```
+
+`SELFTEST=relaunch` inverts the "the digest survived" assertion and fails exactly there (log
+above), so the leg is not self-satisfying.
+
+### Coverage added by this slice
+
+| Family | Status |
+|---|---|
+| the digest over one block (the salt + a 4-digit code) | **tested** — `the_digest_is_sha256_of_the_salt_then_the_code` |
+| the empty message and the 55/56-byte padding boundary, and many blocks | **tested** — `the_hash_matches_the_standard_vectors` |
+| a code set before a restart opens the same keypad after it | **tested** — phase 14 (PASS), inverted by `SELFTEST=relaunch`, `EXIT:1` |
+| the package declares no dependency but the SDK and ships no lock | **tested** — `verify-sdk-package.py` (R9 rows), the launcher build prints no registry crates |
+
+### One observed intermittent, recorded not hidden
+
+On 2026-11-23 the `SELFTEST=owner` leg failed once at **phase 11b** (`items near the removed
+keypad: []`, "the installed module vanished with a level-side removal"), before reaching its own
+inverted assertion; the leg was green again on the re-run (`e2e-selftest-owner.log`), the PASS leg
+was green twice, and a targeted probe of the same rig (10 installs, gaps of 0/1/2/4/8 ticks before
+`/setblock`) kept the module **10 of 10** (`r9-probe-nonloot.log`). The failing run is kept as
+[`../_shared/evidence/securitycraft/r9-owner-flake-11b.log`](../../_shared/evidence/securitycraft/r9-owner-flake-11b.log).
+The digest change cannot reach that path (`hash_code` is called only from `submit`/`after_submit`),
+so it is a **pre-existing** intermittent in the module stash (`block_changed` + `level_tick_post`,
+0.2.3's design) and needs its own diagnosis slice; it is not silently called green. A candidate
+explanation to test: a keypad tick that reads an empty module list races an install in the same
+tick (`remember_modules` erases on an empty list), so the stash can be emptied just before the
+removal.
+
+### Changelog for the resubmission (0.2.5)
+
+> Supersedes #1677 (0.2.4). The package now declares **no dependency but the SDK's
+> `horizon-mod-api`** and ships **no `Cargo.lock`**: the registry refuses both (R9/R10, #1800 was
+> closed for `serde_json`). The keypad's salted SHA-256 is the port's own implementation in
+> `src/runtime.rs` (FIPS 180-4, no `unsafe`, no macros), with the empty-message and 55/56-byte
+> padding vectors added beside the existing digest vector; behaviour, save format and the NBT keys
+> are unchanged, and the e2e now includes a quit-and-relaunch leg proving a code stored before the
+> restart still opens the keypad. `Cargo.toml` carries `[package]` and the SDK path dependency only.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port, rust-review

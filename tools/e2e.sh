@@ -45,12 +45,16 @@
 #     moves the owner: a stranger's click opens no set screen, a set screen that outlives
 #     an owner change stores nothing, the owner's set works, and a stranger's
 #     `/securitycraft code` is refused while the owner's code survives.
+# 14. RELAUNCH: the same world is quit and started again; the code stored before the
+#     restart still opens the same keypad and a wrong code is still refused, so the
+#     digest is recomputed from the saved salt rather than held in the session.
 #
 #   tools/e2e.sh               # the scenario above
 #   SELFTEST=1 tools/e2e.sh    # phase 4 expects the door CLOSED: must exit 1
 #   SELFTEST=harming tools/e2e.sh  # phase 12 expects the missing damage: exit 1
 #   SELFTEST=nonloot tools/e2e.sh  # phase 11b expects the module to have vanished: exit 1
 #   SELFTEST=owner tools/e2e.sh    # phase 13b expects the stranger's code stored: exit 1
+#   SELFTEST=relaunch tools/e2e.sh # phase 14 expects the stored digest lost: exit 1
 #   CONTROL=1 tools/e2e.sh     # no package at all: the ids must be unknown
 #   GAME=<an unmodified game> tools/e2e.sh   # the differential: the first phase fails
 #
@@ -711,5 +715,41 @@ ctl close >/dev/null 2>&1 || true
 ctl command "gamemode creative @s" >/dev/null
 ctl wait 4
 
-echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes rate-limited a correct one; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke — and survived a level-side /setblock removal as a dropped item; a keypad without the module did not hurt a wrong code; and only the owner may set a keypad's first code — a stranger's click opened no set screen, a set screen that outlived an owner change stored nothing, the owner set it, and a stranger's /securitycraft code was refused"
+say "phase 14: a code set before a restart still opens the same keypad after it"
+# The digest is salted SHA-256 over data the keypad saved, so a restart re-reads the
+# same salt and the same digest from the block entity and must recompute a match. A
+# digest that only worked in the session that stored it would pass every phase above
+# and fail here.
+line=$(info "$KEY_X" "$KEY_Y" "$KEY_Z")
+echo "keypad before the relaunch: $line"
+[ "$(field code "$line")" = set ] || fail "the keypad lost its code before the relaunch: $line"
+ctl close >/dev/null 2>&1 || true
+ctl quit >/dev/null 2>&1 || true
+sleep 5
+launch SecurityCraftE2E
+ctl wait 20 >/dev/null
+line=$(info "$KEY_X" "$KEY_Y" "$KEY_Z")
+echo "keypad after the relaunch: $line"
+if [ "$SELFTEST" = relaunch ]; then
+    # Fail-capability: invert the assertion — the restart must lose the stored digest.
+    [ "$(field code "$line")" = none ] || fail "SELFTEST: expected the relaunch to lose the stored digest"
+fi
+[ "$(field code "$line")" = set ] || fail "the relaunch lost the stored digest: $line"
+open_screen "$KEY_X" "$KEY_Y" "$KEY_Z"
+type_code 9999
+press_submit
+line=$(info "$KEY_X" "$KEY_Y" "$KEY_Z")
+echo "a wrong code after the relaunch: $line"
+[ "$(field status "$line")" = 1 ] || fail "a wrong code after the relaunch was not refused: $line"
+[ "$(door_open "$DOOR_X" 101 "$DOOR_Z")" = false ] || fail "a wrong code after the relaunch opened the door"
+open_screen "$KEY_X" "$KEY_Y" "$KEY_Z"
+type_code 1234
+press_submit
+line=$(info "$KEY_X" "$KEY_Y" "$KEY_Z")
+echo "the right code after the relaunch: $line"
+[ "$(field powered "$line")" = true ] || fail "the code set before the relaunch no longer opens the keypad: $line"
+[ "$(door_open "$DOOR_X" 101 "$DOOR_Z")" = true ] || fail "the keypad's signal after the relaunch did not open the door"
+ctl close >/dev/null 2>&1 || true
+
+echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes rate-limited a correct one; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke — and survived a level-side /setblock removal as a dropped item; a keypad without the module did not hurt a wrong code; and only the owner may set a keypad's first code — a stranger's click opened no set screen, a set screen that outlived an owner change stored nothing, the owner set it, and a stranger's /securitycraft code was refused; and after quitting and relaunching the same world the code stored before the restart still opens the keypad and a wrong code is still refused"
 # The cleanup trap prints the run's exit status as the last line.

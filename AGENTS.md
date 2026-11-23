@@ -32,15 +32,19 @@ ports/tools/build-slot.sh run --job sdk-sc --port ports/securitycraft --step che
   `wrong_code_damage` and slice 4's `may_set_code`; its sha256 is
   `a0fca2d0a17521a5b3f928605cf975fe3866060a7db4c4d8ef6991c856e11f4e` (the pre-review carried file was
   `1b2744a909c36c98d4c78dc09a28a060709c1fa17543ffed571f5c384fb1756a`, review #1197's was
-  `8f78aba5…03f3`, and slice 3's was `faafca14…a201`): the behaviour rules live there,
+  `8f78aba5…03f3`, slice 3's was `faafca14…a201`, and 0.2.5's own-SHA-256 change made it
+  `b17ecb963ec2886a76dc8fa627386371b0b437820741811581e968ac383743dc`): the behaviour rules live there,
   `src/support.rs` and `src/lib.rs` only convert SDK types to theirs. New rule → a test in
   `runtime.rs`; new glue → a private fn and a test in `support.rs`.
 - Only the API the SDK publishes: `cargo horizon-mod hooks <text>` finds the exact method; never
   guess a name, and record an API gap in `notes.md` instead of faking one.
 - The delivered package is `securitycraft.hmod` **in the port root**, never in `target/`;
   `LICENSE` and `LICENSE-NOTICE.md` travel inside it.
-- `sha2` is this package's one registry dependency (the carried rules module hashes the code);
-  its `Cargo.lock` therefore ships inside the package — unlike the lock-free content-only ports.
+- **The only dependency is the SDK.** The registry refuses any other (`tools/native-subset/src/
+  manifests.rs`, R9) and a lock that is not the previous release's (R10), so the keypad's salted
+  SHA-256 is this port's own code in `src/runtime.rs` (`fn sha256`, `SHA256_K`) and **no
+  `Cargo.lock` travels in the package**. Never add a crate here, and `rm -f Cargo.lock` before a
+  build: `cargo test` writes one, and the builder would pack it.
 - Keep the port separate from Horizon and horizon-mixins; never modify the pin checkouts, never
   commit binaries, exported sources or Minecraft assets, and never put Mojang files in the tree.
 - `python3 ports/tools/check-skills.py --notes ports/securitycraft` must stay green, and

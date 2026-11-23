@@ -1,11 +1,11 @@
-# Package receipt — securitycraft 0.2.4
+# Package receipt — securitycraft 0.2.5
 
 | field | value |
 |---|---|
-| version | `0.2.4` |
+| version | `0.2.5` |
 | file | `securitycraft.hmod` |
-| bytes | 59,524 |
-| sha256 | `eb42fd50fa0b81da38a083b2dd0c6b25847133d4aa8705469f15992b07679b91` |
+| bytes | 59,040 |
+| sha256 | `7c93b68dc46f2ab00d533830c222795527abdb456942f8fc8fae84e72c074dc8` |
 | source | this tag — the tree here is the source that produced the archive |
 | game | 26.3 |
 | horizon | `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` |
