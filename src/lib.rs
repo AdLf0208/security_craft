@@ -80,6 +80,24 @@ impl BlockEntityPart for Keypad {
         support::on_block_entity()
     }
 
+    /// `BlockEntity.getUpdateTag`: send only the installed module ids to clients, so the
+    /// disguise render can read them without the salted passcode digest leaving the server.
+    fn block_entity_update_tag(
+        &self,
+        event: &mut mod_api::BlockEntityUpdateTagEvent<'_>,
+    ) -> Option<mod_api::Compound> {
+        support::update_tag(event)
+    }
+
+    /// `BlockEntityRenderer.submit`: draw the disguised keypad's tinted block on the client.
+    fn block_entity_submit(
+        &self,
+        host: &dyn mod_api::ClientHost,
+        event: &mut mod_api::BlockEntitySubmitEvent<'_>,
+    ) {
+        support::submit(host, event);
+    }
+
     /// `EntityBlock.getTicker`: the keypad's signal counts down on the server.
     fn block_entity_ticks(&self, _host: &dyn mod_api::Host, event: &mut BlockEntityTicksEvent<'_>) {
         support::on_ticks(event);
@@ -162,11 +180,13 @@ impl Hooks for Mod {
         let allowlist_module = r.item_key(support::ALLOWLIST_MODULE);
         let denylist_module = r.item_key(support::DENYLIST_MODULE);
         let smart_module = r.item_key(support::SMART_MODULE);
+        let disguise_module = r.item_key(support::DISGUISE_MODULE);
         support::set_module_items(
             harming_module,
             allowlist_module,
             denylist_module,
             smart_module,
+            disguise_module,
         );
     }
 

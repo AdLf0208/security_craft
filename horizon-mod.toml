@@ -1,14 +1,14 @@
 id = "securitycraft"
 name = "SecurityCraft"
-version = "0.2.8"
+version = "0.2.9"
 description = """SecurityCraft's keypad and reinforced door: a keypad stores a salted digest of a typed code,
 asks for it on a drawn panel of keys and, on a match, powers itself for three seconds; a reinforced
 door beside it opens on that redstone signal and closes when it runs out. The keypad's placer is its
 owner: only the owner may set its first code or install a module. The harming module hurts a player
 who enters a wrong code; the allowlist module opens a coded keypad for a listed player without a
-code, the denylist module refuses a listed player any interaction, and the smart module applies the
-retry cooldown after wrong codes. The disguise module, the cameras, the mines and the lasers are not
-ported yet."""
+code, the denylist module refuses a listed player any interaction, the smart module applies the
+retry cooldown after wrong codes, and the disguise module renders the keypad as a tinted block.
+The cameras, the mines and the lasers are not ported yet."""
 authors = ["Geforce, bl4ckscor3, Redstone_Dubstep, and ChainmailPickaxe", "AdLf0208"]
 # A native mod: Rust in src/, compiled by the launcher against the game build [native] pins,
 # beside data/ and assets/. The id is the resource namespace and the only identity: Cargo's

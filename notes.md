@@ -1955,16 +1955,125 @@ relaunch legs stayed green unchanged in this leg.
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-review, rust-port
 
+## Slice 8 (0.2.9): the disguise module and its keypad tint
+
+**Slice and gap line.** The last module-family gap from slice 3's line "the smart and harming
+modules; the disguise module", now that harming, allowlist, denylist and smart are all ported. It
+fits tier **deep**: it is a block-entity client render plus the carried item/recipe/texture/lang,
+the same install/drop/readout paths as the other four modules, and no new block or machine.
+
+**The pin gate — measured, not assumed.** Grep of `ports/_shared/sdk/0a875da/surface.json` is
+**not zero-hit**: `register_block_tint_sources`, `register_item_tint_sources`,
+`register_color_resolvers`, `block_entity_submit` (client, `entity: &ModBlockEntity` = the
+server-synced saved data), `block_entity_update_tag` (server, sets what clients get) and the host's
+`block_entity_sync(pos)`. `BlockEntityPart` carries both BE methods, so a mod can push the installed
+modules to the client and draw from them. This is **not** buildinggadgets2's
+`blocked(no-client-held-stack-components)` shape: that blocker was the *player's held item stack*,
+which the client host cannot read with components (`player_inventory_slots` is server-only); here the
+state driving the render lives in the **block entity**, which the client copy explicitly carries. A
+block *tint source* cannot read it (`BlockAndTintGetter`: "Block entities are not part of the
+region"), so the render is done in `block_entity_submit`, not as a tint-source callback.
+
+**Red → green.** Adding the failing test first (`runtime::tests::a_disguised_keypad_tints_only_with_the_module`)
+failed to compile: `error[E0425]: cannot find function 'disguise_tint' in this scope` (and the two
+undefined constants), `slice8-red` via the forwarded slot. Defining `DISGUISE_MODULE`,
+`DISGUISE_TINT` and `disguise_tint` in `runtime.rs` made it green. A second glue test,
+`all_five_installed_modules_drop`, pins the fifth id through the drop path.
+
+**What the jar supplied.** Item `securitycraft:disguise_module`, recipe III/IPI/ISI with
+`I = minecraft:iron_ingot`, `P = minecraft:paper`, `S = minecraft:painting` (the jar's
+`c:ingots/iron` and `minecraft:painting`, resolved to vanilla ids as for the other modules), the
+item model, the 624-byte `disguise_module.png` texture and the en_us name/description. The
+artefact's id wins over any name guessed from the mod's name.
+
+**Render, as measured.** The first two in-game probes established, from frames and not from
+reading Java: (1) `draw.cube`'s box is in **texels** (16 per block), not block units; (2) this engine
+build does **not** multiply the cube's `tint` argument into its faces — a white-concrete cube tinted
+`0xFF00FF00` rendered grey, and lime/red-concrete atlas sprites named through `CubeFace` drew
+nothing. The working path is `host.block_key("minecraft:lime_concrete")` + `draw.block(...)`, which
+draws the block's own green texels; block-entity models are unlit at this pin, so the green is dark
+but green-dominant. The pure rule still gates the render on the installed module, and the server
+pushes that state with `block_entity_sync(pos)` after the in-place install.
+
+### Evidence (all forwarded to AdLf-PC except the launcher/e2e legs)
+
+| Check | Evidence | Result |
+|---|---|---|
+| Red (forwarded `cargo test`) | new rule referenced before definition | `cannot find function 'disguise_tint'`, `EXIT:101` |
+| Tests + clippy + fmt | `slice8-lint.log`, `sdk-test.log` (regenerated for 0.2.9) | **55 passed**, 0 failed, 0 warnings, fmt clean |
+| Two builds + `cmp` | `slice8-build.log`, `slice8-build2.log` | byte-identical, `rm -f Cargo.lock` before each |
+| Delivered package | `securitycraft.hmod` | **73,976 B**, SHA-256 `b9f614efd830c11a0e1b3416736ec841ea37855cb84cc7fa208b410b880`, **65 entries**, no `Cargo.lock`, version 0.2.9 |
+| `cargo horizon-mod check` | `slice8-check-fits.log` | `securitycraft 0.2.9 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, same SHA, EXIT 0 |
+| `fits --build 0a875da` | `slice8-check-fits.log` | `0a875da  made for`, EXIT 0 |
+| `fits --build 0b14f8a` | `slice8-check-fits.log` | `0b14f8a  fits`, EXIT 0, same SHA |
+| Gate | `slice8-verify-sdk-package.log` | **1/1**, incl. `package matches the tree`, SDK-only deps, no lock, 55 tests |
+| Clean launcher build | stale `native-0a875da` tag moved aside, `launcher-game.sh build securitycraft` | `Compiling securitycraft (1 of 1)`, no registry crates, `native-0a875da-36c1a04c654d` (`slice8-launcher-build.log`) |
+| In-game PASS | launcher-built game carrying 0.2.9 | **PASS + `EXIT:0`**, all 18 phases incl. phase 18 (`securitycraft-e2e/e2e-launcher.log`) |
+| Control (unmodified Nightly) | `GAME=$CONTROL_GAME` | **`EXIT:1`** at phase 1, the package's ids are unknown (`e2e-control.log`) |
+| Ids-unknown control | `CONTROL=1` | PASS + `EXIT:0`, both ids unknown (`e2e-ids-unknown.log`) |
+| Prior SELFTESTs (door/harm/nonloot/owner/relaunch/allow/deny/smart) | `SELFTEST=1\|harming\|nonloot\|owner\|relaunch\|allow\|deny\|smart` | **`EXIT:1`** at each own assertion (`e2e-selftest*.log`) |
+| SELFTEST (disguise) | `SELFTEST=disguise` | **`EXIT:1`** at phase 18, "expected the disguised keypad NOT to be green-dominant" (`e2e-selftest-disguise.log`) |
+| Log checker | `check-e2e-logs.py securitycraft-e2e --strict` | `logs=15 ok=15`, exit 0 (`slice8-check-e2e-logs.log`) |
+| Recipe types | `check-recipe-types.py securitycraft` | `securitycraft: ok`, exit 0 |
+
+Phase 18 in the PASS leg (`e2e-launcher.log`):
+
+```
+disguise recipe result: securitycraft:disguise_module
+disguise grid slots still holding an item: 0
+plain keypad pixel: PIXEL 176 176 176 sampled=441 at=640,260
+disguised keypad pixel: PIXEL 6 11 2 sampled=441 at=640,260
+parsed RGB: plain=(176,176,176) disguised=(6,11,2)
+green-dominant: plain=0 disguised=1 sum: plain=528 disguised=19
+```
+
+The two screenshots are `securitycraft-e2e/disguise-plain.png` and
+`securitycraft-e2e/disguise-disguised.png`. The inverted leg read `plain=0 disguised=1` and stopped
+exactly there at `EXIT:1`. One pre-existing e2e flake was diagnosed and removed: temporarily
+widening `info()` to `ctl messages 30` consistently broke phase 2's second key sequence (the
+code was never stored); reverting it to `messages 8` made the whole leg green again. The render
+diagnostics (cube texel units, ignored tint argument, atlas sprite vs `draw.block`) are recorded
+above and their frames kept as `diag-unconditional.png`.
+
+### Coverage added by this slice
+
+| Family | Status |
+|---|---|
+| `securitycraft:disguise_module` item (give, craft, install, drop) | **tested** — phase 18 recipe (id/count + emptied grid), `modules=disguise` install, `all_five_installed_modules_drop` unit test |
+| the disguise recipe (III/IPI/ISI, iron + paper + painting) | **tested** — phase 18: output id and an emptied grid |
+| disguised keypad render (green-dominant pixel) | **tested** — phase 18: `--offscreen` screenshot of the same keypad before/after install, parsed RGB in the log; inverted by `SELFTEST=disguise` |
+| deny-before-allow order, smart-module gate | unchanged — unit tests + phases 3b/14/16/17 green in the PASS leg |
+| disguise block chosen by a module GUI | **not ported** — the pin stamps no module screen; the port fixes one appearance (deviation below) |
+
+### Deviations recorded by this slice
+
+1. **The disguise appearance is fixed, not GUI-chosen.** Upstream's `DisguiseModuleScreen` and
+   `SetStateOnDisguiseModule` let a player pick any block state; no module screen is stamped at this
+   pin, so the port renders a fixed lime-concrete disguise. The delivered behaviour is the visible
+   disguise (a green-tinted keypad), not the selection UI.
+2. **The cube's `tint` argument is ignored by this engine build** (measured above), so green comes
+   from the block's own sprite; `DISGUISE_TINT` remains the pure rule's declared colour.
+3. **The block-entity model is unlit**, so the green is dark but unambiguously green-dominant; the
+   in-game assertion is a ratio/brightness comparison, not an absolute colour match.
+
+### Changelog for the resubmission (0.2.9)
+
+> Supersedes the staged 0.2.8 record. Carries the jar's `disguise_module` (recipe with a painting,
+> texture, model and lang) as a fifth module through the same owner install/drop paths, and renders
+> a disguised keypad with a green block-entity model: an `--offscreen` screenshot of the same keypad
+> before and after installing the module differs in green-dominance and brightness, inverted by
+> `SELFTEST=disguise`. The salted SHA-256, SDK-only dependency set, save format, deny-before-allow
+> order and smart-module gate are unchanged.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-review, rust-port
+
 ## Next slice
 
-**Family:** the **disguise module and its keypad tint** — the last of the module family in the gap
-line from slice 3 ("the smart and harming modules; the disguise module"), now that harming,
-allowlist, denylist and smart are all ported. It fits tier **deep** only if the SDK exposes a
-per-block tint/colour hook for the keypad's rendered model: carry the jar's `disguise_module` item,
-recipe, texture and lang, add a fifth `modules` id through the same install/drop paths, and render
-the keypad as the disguise item's model when installed. **First check the pin** with
-`cargo horizon-mod hooks <tint>` / grep the SDK's `surface.json` for a block/item colour or model
-override: if that surface is absent, report `blocked(no-disguise-render-surface)` with the measured
-zero-hit grep rather than shipping an inert item. Its in-game assertion would be an `--offscreen`
-`screenshot` leg: install a disguise module on a keypad, give the disguise item the module names,
-and read a pixel colour that differs from an undisguised keypad, with an inverted `SELFTEST=disguise`.
+**Family:** the remaining **content families in the gap list** (the passcode chest/barrel/furnace/
+smoker, keypad door and trapdoor, the universal block modifier), or, if the disguise selection UI is
+wanted, a re-check at a pin that stamps a module screen. The disguise module family is now closed:
+the five module ids are carried, proven in game and packaged. Before any new gap, re-read the pin
+delta (`check-pin-updates.py`) — a module-screen or item-component surface would lift the two
+recorded deviations. The in-game assertion for a carried container would be a placed block opened by
+its owner with its code, reading its saved contents and an unknown id refused, with a differential
+on an unprotected vanilla container.

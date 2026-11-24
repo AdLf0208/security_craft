@@ -24,17 +24,17 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mod_api::{
-    BlockChangedEvent, BlockEntityTickEvent, ClientHost, Compound, DrawContext, Host,
-    HostTransaction, InteractionResult, ItemKey, ItemPlace, ItemResource, ItemStack, LevelHost,
-    LevelRef, LevelTickPostEvent, MenuButtonEvent, ModContainer, OnBlockPlacedByEvent,
-    RandomSource, Screen, ScreenClickEvent, ScreenDrawEvent, ServerHost, StateForPlacementEvent,
-    Tag, Text,
+    BlockChangedEvent, BlockEntitySubmitEvent, BlockEntityTickEvent, BlockEntityUpdateTagEvent,
+    ClientHost, Compound, DrawContext, Host, HostTransaction, InteractionResult, ItemKey,
+    ItemPlace, ItemResource, ItemStack, LevelHost, LevelRef, LevelTickPostEvent, MenuButtonEvent,
+    ModContainer, OnBlockPlacedByEvent, RandomSource, Screen, ScreenClickEvent, ScreenDrawEvent,
+    ServerHost, StateForPlacementEvent, Tag, Text,
 };
 
 use crate::runtime::{
     Action, Button, DEFAULT_SIGNAL_TICKS, Entry, ListData, Mode, Throttle, after_submit, button,
-    cooldown_allows, cooldown_failed, facing_from_yaw, hash_code, is_allowed, is_denied,
-    may_install, may_set_code, new_salt, tick_signal, valid_code, wrong_code_damage,
+    cooldown_allows, cooldown_failed, disguise_tint, facing_from_yaw, hash_code, is_allowed,
+    is_denied, may_install, may_set_code, new_salt, tick_signal, valid_code, wrong_code_damage,
 };
 
 /// The keypad block; its item (`securitycraft:keypad_item`) places it.
@@ -86,6 +86,8 @@ pub(crate) const DENYLIST_MODULE: &str = "securitycraft:denylist_module";
 /// `IPasscodeProtected.onIncorrectPasscodeEntered` starts the keypad's cooldown only
 /// when this module is installed.
 pub(crate) const SMART_MODULE: &str = "securitycraft:smart_module";
+/// The disguise module's item id. The jar registers it as `disguise_module`; the artefact's id wins.
+pub(crate) const DISGUISE_MODULE: &str = crate::runtime::DISGUISE_MODULE;
 /// The damage type a wrong code uses (`data/securitycraft/damage_type/incorrect_passcode.json`),
 /// upstream's `CustomDamageSources.INCORRECT_PASSCODE`.
 pub(crate) const INCORRECT_PASSCODE: &str = "securitycraft:incorrect_passcode";
@@ -97,22 +99,25 @@ struct ModuleItems {
     allowlist: ItemKey,
     denylist: ItemKey,
     smart: ItemKey,
+    disguise: ItemKey,
 }
 
 static MODULE_ITEMS: OnceLock<ModuleItems> = OnceLock::new();
 
-/// Store all four module keys at registration.
+/// Store all five module keys at registration.
 pub(crate) fn set_module_items(
     harming: ItemKey,
     allowlist: ItemKey,
     denylist: ItemKey,
     smart: ItemKey,
+    disguise: ItemKey,
 ) {
     let _ = MODULE_ITEMS.set(ModuleItems {
         harming,
         allowlist,
         denylist,
         smart,
+        disguise,
     });
 }
 
@@ -123,6 +128,7 @@ fn module_item(module: &str) -> Option<ItemKey> {
         ALLOWLIST_MODULE => Some(items.allowlist),
         DENYLIST_MODULE => Some(items.denylist),
         SMART_MODULE => Some(items.smart),
+        DISGUISE_MODULE => Some(items.disguise),
         _ => None,
     }
 }
@@ -399,6 +405,43 @@ pub(crate) fn on_block_entity() -> Option<Compound> {
     Some(Compound::new())
 }
 
+/// What clients get of the keypad for the disguise render: only the installed module ids.
+/// The rest of the saved compound — the salted digest above all — stays on the server.
+pub(crate) fn update_tag(event: &mut BlockEntityUpdateTagEvent<'_>) -> Option<Compound> {
+    let installed = modules(&event.entity.nbt);
+    if installed.is_empty() {
+        return None;
+    }
+    let mut out = Compound::new();
+    put(
+        &mut out,
+        KEY_MODULES,
+        Tag::List(
+            installed
+                .into_iter()
+                .map(|id| Tag::String(id.as_str().into()))
+                .collect(),
+        ),
+    );
+    Some(out)
+}
+
+/// Draw a disguised keypad as its fixed tinted block. The keypad's own model still meshes
+/// underneath; a block entity's geometry is drawn after terrain, so the expanded cube covers it.
+pub(crate) fn submit(host: &dyn ClientHost, event: &mut BlockEntitySubmitEvent<'_>) {
+    if disguise_tint(&modules(&event.entity.nbt)).is_none() {
+        return;
+    }
+    // This engine build does not multiply a colour into a cube's faces from its `tint`
+    // argument (measured: a white sprite tinted green rendered grey). Drawing a real
+    // lime-concrete block by key is the robust path: its own texels are green. The pure rule
+    // above still gates the render on the installed module.
+    let Some(block) = host.block_key("minecraft:lime_concrete") else {
+        return;
+    };
+    let _ = event.draw.block(block, &[]);
+}
+
 /// The keypad item placed its block: the placer becomes the keypad's owner.
 ///
 /// Upstream's `Block.setPlacedBy` gives an `IOwnable` block its owner, and the owner is
@@ -505,6 +548,7 @@ pub(crate) fn on_use(
             ALLOWLIST_MODULE => Some(ALLOWLIST_MODULE),
             DENYLIST_MODULE => Some(DENYLIST_MODULE),
             SMART_MODULE => Some(SMART_MODULE),
+            DISGUISE_MODULE => Some(DISGUISE_MODULE),
             _ => None,
         });
     if let Some(module) = module
@@ -521,6 +565,12 @@ pub(crate) fn on_use(
         }
         if let Some(dimension) = level.dimension().id(&*host) {
             remember_modules(&dimension, pos, installed);
+        }
+        // The disguise render reads the installed modules from this block entity's client
+        // copy. An install is an in-place write with no block-state change, so push the
+        // update tag explicitly (as vanilla's `sendBlockUpdated` does).
+        if module == DISGUISE_MODULE {
+            host.block_entity_sync(pos);
         }
         let resource = ItemResource::of(stack);
         let hand = ItemPlace::PlayerHand {
@@ -1015,7 +1065,11 @@ fn dropped_module_ids(installed: &[String]) -> Vec<String> {
         .filter(|module| {
             matches!(
                 module.as_str(),
-                HARMING_MODULE | ALLOWLIST_MODULE | DENYLIST_MODULE | SMART_MODULE
+                HARMING_MODULE
+                    | ALLOWLIST_MODULE
+                    | DENYLIST_MODULE
+                    | SMART_MODULE
+                    | DISGUISE_MODULE
             )
         })
         .cloned()
@@ -1196,6 +1250,9 @@ fn keypad_info(
         }
         if has_module(&data, SMART_MODULE) {
             names.push("smart");
+        }
+        if has_module(&data, DISGUISE_MODULE) {
+            names.push("disguise");
         }
         if names.is_empty() {
             "none".to_owned()
@@ -1777,20 +1834,23 @@ mod tests {
     }
 
     #[test]
-    fn all_four_installed_modules_drop() {
+    fn all_five_installed_modules_drop() {
         let mut nbt = Compound::new();
         add_module(&mut nbt, HARMING_MODULE);
         add_module(&mut nbt, ALLOWLIST_MODULE);
         add_module(&mut nbt, DENYLIST_MODULE);
         add_module(&mut nbt, SMART_MODULE);
+        add_module(&mut nbt, DISGUISE_MODULE);
         assert_eq!(
             dropped_module_ids(&modules(&nbt)),
             vec![
                 HARMING_MODULE.to_owned(),
                 ALLOWLIST_MODULE.to_owned(),
                 DENYLIST_MODULE.to_owned(),
-                SMART_MODULE.to_owned()
-            ]
+                SMART_MODULE.to_owned(),
+                DISGUISE_MODULE.to_owned()
+            ],
+            "the disguise module drops through the same path as the other four"
         );
     }
 

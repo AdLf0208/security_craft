@@ -7,9 +7,11 @@
     "item.securitycraft.allowlist_module": "Allowlist Module",
     "item.securitycraft.denylist_module": "Denylist Module",
     "item.securitycraft.smart_module": "Smart Module",
+    "item.securitycraft.disguise_module": "Disguise Module",
     "module.securitycraft.keypad.allowlist_module.description": "Adding an allowlist module to a keypad will allow listed players to use the block without knowing the code.",
     "module.securitycraft.keypad.denylist_module.description": "Adding a denylist module to a keypad will ban listed players from interacting with the block.",
     "module.securitycraft.keypad.smart_module.description": "Adding a smart module to a block that requires a passcode will result in a cooldown being applied after an incorrect code has been entered. During that time, no new code can be entered.",
+    "module.securitycraft.keypad.disguise_module.description": "Adding a disguise module to a keypad makes it render as a disguised block instead of its own model.",
     "death.attack.securitycraft.incorrectPasscode": "%s entered an incorrect code",
     "death.attack.securitycraft.incorrectPasscode.player": "%1$s entered an incorrect code whilst fighting %2$s"
 }

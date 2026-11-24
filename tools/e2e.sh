@@ -59,6 +59,10 @@
 #     refused (`status=6`, unpowered, door closed) — upstream gates the cooldown on that
 #     module. Phase 3b proves the same five wrong codes do NOT lock out a keypad without
 #     any module. `SELFTEST=smart` inverts the phase 3b no-module assertion.
+# 18. DISGUISE: craft the jar's disguise module (painting in the last row), install it on a
+#     fresh keypad, and photograph the same keypad from one camera before and after with an
+#     --offscreen screenshot. The disguised face must be green-dominant (the port's fixed tint)
+#     while the plain one is not; `SELFTEST=disguise` inverts that and must exit 1.
 # 15. RELAUNCH: the same world is quit and started again; the code stored before the
 #     restart still opens the same keypad and a wrong code is still refused, so the
 #     digest is recomputed from the saved salt rather than held in the session.
@@ -72,6 +76,7 @@
 #   SELFTEST=allow tools/e2e.sh    # phase 14 expects an allowed click not to power: exit 1
 #   SELFTEST=deny tools/e2e.sh     # phase 16 expects a denied click to open a screen: exit 1
 #   SELFTEST=smart tools/e2e.sh    # phase 3b expects a no-module cooldown: exit 1
+#   SELFTEST=disguise tools/e2e.sh # phase 18 expects no green tint: exit 1
 #   CONTROL=1 tools/e2e.sh     # no package at all: the ids must be unknown
 #   GAME=<an unmodified game> tools/e2e.sh   # the differential: the first phase fails
 #
@@ -1053,6 +1058,101 @@ echo "right code with the smart module: $line"
 [ "$(door_open "$SMART_DOOR_X" 101 "$SMART_DOOR_Z")" = false ] || fail "a locked-out attempt opened the smart door"
 ctl close >/dev/null 2>&1 || true
 
+say "phase 18: the disguise module tints the keypad (an --offscreen screenshot pixel difference)"
+# Upstream's DisguiseModuleScreen stores a chosen block state on the module and the keypad's
+# block-entity renderer draws that state. The pin stamps no module screen, so this port fixes
+# one tinted appearance (runtime::DISGUISE_TINT) and proves it with a parsed pixel: the module
+# is crafted from the jar's recipe, installed through the same owner gate, and the very same
+# keypad is photographed before and after from one camera position. SELFTEST=disguise inverts
+# the green-dominance assertion and must end at EXIT:1.
+shot_rgb() { # X Y Z PATH -> echoes the helper's PIXEL line
+    local bx=$1 by=$2 bz=$3 out=$4
+    ctl close >/dev/null 2>&1 || true
+    ctl tp "$bx.5" "$by" "$(( bz + 2 )).5" >/dev/null
+    ctl wait 6 >/dev/null
+    ctl look 180 0 >/dev/null
+    ctl wait 2 >/dev/null
+    ctl look-at block "$bx" "$by" "$bz" south >/dev/null 2>&1 || true
+    ctl wait 6 >/dev/null
+    ctl screenshot "$out" >/dev/null || fail "screenshot failed: $out"
+    ctl wait 2 >/dev/null
+    cp "$out" "$CLONE/ports/_shared/evidence/securitycraft-e2e/disguise-$(basename "$out")"
+    python3 "$PORT/tools/pixel.py" "$out" | tee /dev/stderr
+}
+
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl wait 2
+ctl give minecraft:iron_ingot 7 >/dev/null
+ctl give minecraft:paper 1 >/dev/null
+ctl give minecraft:painting 1 >/dev/null
+ctl wait 6
+open_screen_table "$ATABLE_X" "$ATABLE_Z"
+for cell in 100 101 102 103 105 106 108; do grid_put_one minecraft:iron_ingot "$cell"; done
+grid_put_one minecraft:paper 104
+grid_put_one minecraft:painting 107
+ctl wait 4
+result=$(ctl screen | jq -r '[.slots[]? | select(.slot == 200) | .item][0] // "empty"')
+echo "disguise recipe result: $result"
+[ "$result" = securitycraft:disguise_module ] || fail "the disguise module recipe produced '$result'"
+ctl click-slot 200 shift >/dev/null || fail "cannot take the crafted disguise module"
+ctl wait 4
+left=$(ctl screen | jq -r '[.slots[]? | select(.slot >= 100 and .slot <= 108 and .item != null)] | length')
+echo "disguise grid slots still holding an item: $left"
+[ "$left" = 0 ] || fail "the disguise recipe did not consume its ingredients ($left grid slots filled)"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4
+
+DIS_X=$((PX+4)); DIS_Y=101; DIS_Z=$((PZ-4))
+ctl give securitycraft:keypad_item 1 >/dev/null
+ctl wait 6
+ctl select securitycraft:keypad_item >/dev/null
+ctl tp "$(( DIS_X + 1 )).5" 101 "$(( DIS_Z + 2 )).5" >/dev/null
+ctl wait 4
+ctl place "$DIS_X" "$DIS_Y" "$DIS_Z" >/dev/null || fail "the disguise keypad did not place"
+ctl wait 4
+block_name "$DIS_X" "$DIS_Y" "$DIS_Z" | grep -qx "$KEYPAD" || fail "no disguise keypad"
+line=$(info "$DIS_X" "$DIS_Y" "$DIS_Z")
+[ "$(field modules "$line")" = none ] || fail "the fresh keypad already has a module: $line"
+
+plain=$(shot_rgb "$DIS_X" "$DIS_Y" "$DIS_Z" "$SCRATCH/plain.png")
+echo "plain keypad pixel: $plain"
+
+ctl select securitycraft:disguise_module >/dev/null
+ctl tp "$(( DIS_X + 1 )).5" 101 "$(( DIS_Z + 2 )).5" >/dev/null
+ctl wait 4
+ctl look 180 0 >/dev/null
+ctl wait 2
+ctl look-at block "$DIS_X" "$DIS_Y" "$DIS_Z" south >/dev/null 2>&1 || true
+ctl interact "$DIS_X" "$DIS_Y" "$DIS_Z" south >/dev/null || fail "the keypad did not take the disguise module"
+ctl wait 6
+line=$(info "$DIS_X" "$DIS_Y" "$DIS_Z")
+echo "after installing the disguise module: $line"
+[ "$(field modules "$line")" = disguise ] || fail "the disguise module was not installed: $line"
+
+disguised=$(shot_rgb "$DIS_X" "$DIS_Y" "$DIS_Z" "$SCRATCH/disguised.png")
+echo "disguised keypad pixel: $disguised"
+
+read -r _ pr pg pb _ <<<"$plain"
+read -r _ dr dg db _ <<<"$disguised"
+echo "parsed RGB: plain=($pr,$pg,$pb) disguised=($dr,$dg,$db)"
+# The disguise block is lime concrete (the port's fixed green appearance, runtime::DISGUISE_TINT).
+# Block-entity models draw unlit at this pin, so the green is dark: assert green *dominance*
+# by ratio, plus a clear brightness change from the plain keypad's own light texture.
+green_disguised=$(( dg * 2 > dr * 3 && dg * 2 > db * 3 ? 1 : 0 ))
+green_plain=$(( pg * 2 > pr * 3 && pg * 2 > pb * 3 ? 1 : 0 ))
+sum_plain=$(( pr + pg + pb )); sum_disguised=$(( dr + dg + db ))
+echo "green-dominant: plain=$green_plain disguised=$green_disguised sum: plain=$sum_plain disguised=$sum_disguised"
+if [ "$SELFTEST" = disguise ]; then
+    [ "$green_disguised" = 0 ] || fail "SELFTEST: expected the disguised keypad NOT to be green-dominant"
+else
+    [ "$green_disguised" = 1 ] && [ "$green_plain" = 0 ] \
+        || fail "the disguise module did not make the keypad green-dominant"
+    [ $(( sum_plain - sum_disguised )) -gt 100 ] \
+        || fail "the plain and disguised keypads rendered the same brightness"
+fi
+ctl close >/dev/null 2>&1 || true
+
 say "phase 15: a code set before a restart still opens the same keypad after it"
 # The digest is salted SHA-256 over data the keypad saved, so a restart re-reads the
 # same salt and the same digest from the block entity and must recompute a match. A
@@ -1089,5 +1189,5 @@ echo "the right code after the relaunch: $line"
 [ "$(door_open "$DOOR_X" 101 "$DOOR_Z")" = true ] || fail "the keypad's signal after the relaunch did not open the door"
 ctl close >/dev/null 2>&1 || true
 
-echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes did NOT rate-limit a correct one without the smart module; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke — and survived a level-side /setblock removal as a dropped item; a keypad without the module did not hurt a wrong code; and only the owner may set a keypad's first code — a stranger's click opened no set screen, a set screen that outlived an owner change stored nothing, the owner set it, and a stranger's /securitycraft code was refused; the allowlist module crafted from seven iron and two paper was installed on a coded keypad and an allowed click with nothing typed powered it and opened its door without a code screen, while swapping the player for a stranger restored the code screen and left the door closed; the denylist module crafted from seven iron, paper and an ink sac was installed on a coded keypad and a listed player's click opened nothing, powered nothing and left the door closed, while swapping the list to a stranger restored the code screen with the door still closed; the smart module crafted from seven iron, paper and an ender pearl was installed on a second coded keypad and five wrong codes then made the right one read status=6 with the keypad unpowered and the door closed, while the same five wrong codes on a keypad without the module still opened it; and after quitting and relaunching the same world the code stored before the restart still opens the keypad and a wrong code is still refused"
+echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes did NOT rate-limit a correct one without the smart module; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke — and survived a level-side /setblock removal as a dropped item; a keypad without the module did not hurt a wrong code; and only the owner may set a keypad's first code — a stranger's click opened no set screen, a set screen that outlived an owner change stored nothing, the owner set it, and a stranger's /securitycraft code was refused; the allowlist module crafted from seven iron and two paper was installed on a coded keypad and an allowed click with nothing typed powered it and opened its door without a code screen, while swapping the player for a stranger restored the code screen and left the door closed; the denylist module crafted from seven iron, paper and an ink sac was installed on a coded keypad and a listed player's click opened nothing, powered nothing and left the door closed, while swapping the list to a stranger restored the code screen with the door still closed; the smart module crafted from seven iron, paper and an ender pearl was installed on a second coded keypad and five wrong codes then made the right one read status=6 with the keypad unpowered and the door closed, while the same five wrong codes on a keypad without the module still opened it; the disguise module crafted from seven iron, paper and a painting was installed on a fresh keypad and an --offscreen screenshot of that very keypad changed from its own texture to the fixed green tint (a parsed pixel difference, inverted by SELFTEST=disguise); and after quitting and relaunching the same world the code stored before the restart still opens the keypad and a wrong code is still refused"
 # The cleanup trap prints the run's exit status as the last line.

@@ -92,6 +92,29 @@ pub fn wrong_code_damage(harming: bool) -> Option<f32> {
     harming.then_some(INCORRECT_PASSCODE_DAMAGE)
 }
 
+/// The id the jar ships for its disguise module (`data/securitycraft/recipe/disguise_module.json`,
+/// `assets/securitycraft/models/item/disguise_module.json`). The artefact's id wins over any name
+/// the brief guessed from the mod's marketing.
+pub const DISGUISE_MODULE: &str = "securitycraft:disguise_module";
+
+/// The fixed tint (0xRRGGBB) a disguised keypad renders with in this port. Upstream's disguise
+/// module carries a GUI-chosen block state (`DisguiseModuleScreen`, `SetStateOnDisguiseModule`);
+/// the pin stamps no module screen, so the port fixes one distinctive appearance instead. The
+/// simplification is recorded as a deviation in `notes.md`.
+pub const DISGUISE_TINT: u32 = 0x00_FF_00;
+
+/// The tint a keypad carrying `modules` renders with, or `None` for its own look.
+///
+/// Upstream's `IModuleInventory.isModuleEnabled(ModuleType.DISGUISE)` gates the disguised render;
+/// the check is by id so it is order-independent and survives other modules being installed.
+#[must_use]
+pub fn disguise_tint(modules: &[String]) -> Option<u32> {
+    modules
+        .iter()
+        .any(|module| module == DISGUISE_MODULE)
+        .then_some(DISGUISE_TINT)
+}
+
 /// The most players a list module carries (upstream `ListModuleData.MAX_PLAYERS`).
 pub const MAX_LIST_PLAYERS: usize = 50;
 
@@ -1123,6 +1146,26 @@ mod tests {
         assert!(
             !may_set_code(None, 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef),
             "an unowned keypad (old save, dispenser) is nobody's to set"
+        );
+    }
+
+    #[test]
+    fn a_disguised_keypad_tints_only_with_the_module() {
+        // Upstream's disguise module makes the device render as another block. This port
+        // fixes one distinctive tint; a keypad without the module keeps its own look.
+        assert_eq!(disguise_tint(&[]), None);
+        assert_eq!(
+            disguise_tint(&["securitycraft:harming_module".to_owned()]),
+            None,
+            "another installed module must not disguise the keypad"
+        );
+        assert_eq!(
+            disguise_tint(&[
+                "securitycraft:harming_module".to_owned(),
+                DISGUISE_MODULE.to_owned(),
+            ]),
+            Some(DISGUISE_TINT),
+            "the disguise module tints the keypad even beside other modules"
         );
     }
 }
