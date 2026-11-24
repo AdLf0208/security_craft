@@ -351,6 +351,67 @@ impl BlockEntityPart for ContainerEntity {
     }
 }
 
+/// The passcode trapdoor's block item: placing it records the placer as owner,
+/// as the barrel, furnace and smoker items do.
+struct TrapdoorItem;
+
+#[mod_api::horizon_part]
+impl ItemPart for TrapdoorItem {
+    fn on_block_placed_by(&self, host: &mut dyn ServerHost, event: &mut OnBlockPlacedByEvent<'_>) {
+        support::on_block_placed_by(host, event);
+    }
+}
+
+/// The passcode trapdoor's block: an already-open trapdoor answers `PASS` to a
+/// right click (upstream's `useWithoutItem`); a hand click never opens an iron
+/// trapdoor, so the carried template handles the rest.
+struct TrapdoorBlock;
+
+#[mod_api::horizon_part]
+impl BlockPart for TrapdoorBlock {
+    fn use_item_on(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut UseItemOnEvent<'_>,
+    ) -> Option<InteractionResult> {
+        support::on_trapdoor_use(host, event.click)
+    }
+
+    fn use_without_item(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut UseWithoutItemEvent<'_>,
+    ) -> Option<InteractionResult> {
+        support::on_trapdoor_use(host, event.click)
+    }
+}
+
+/// The passcode trapdoor's block entity: saved owner/code and the countdown
+/// that closes the block's `open` state after `signalLength` (default 60).
+struct TrapdoorEntity;
+
+#[mod_api::horizon_part]
+impl BlockPart for TrapdoorEntity {}
+
+#[mod_api::horizon_part]
+impl BlockEntityPart for TrapdoorEntity {
+    fn block_entity(
+        &self,
+        _level: LevelSide<'_>,
+        _event: &mut BlockEntityEvent<'_>,
+    ) -> Option<mod_api::Compound> {
+        support::on_block_entity()
+    }
+
+    fn block_entity_ticks(&self, _host: &dyn mod_api::Host, event: &mut BlockEntityTicksEvent<'_>) {
+        support::on_ticks(event);
+    }
+
+    fn block_entity_tick(&self, host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
+        support::on_trapdoor_tick(host, event);
+    }
+}
+
 #[derive(Default)]
 struct Mod;
 
@@ -428,6 +489,22 @@ impl Hooks for Mod {
         r.block_container(&smoker, support::smoker_container());
         let smoker_item = r.item_key(support::SMOKER);
         r.item_part(smoker_item, SmokerItem);
+        // The passcode trapdoor: its own block entity closes the carried iron
+        // trapdoor's `open` state after the signal, and its item records the owner.
+        let trapdoor = r.block_key(support::TRAPDOOR);
+        let trapdoor_kind = r
+            .block_entity_type(support::TRAPDOOR_ENTITY)
+            .blocks(&[support::TRAPDOOR])
+            .build();
+        if let Err(error) = r.block_entity_part(&trapdoor_kind, TrapdoorEntity) {
+            cx.refuse(&format!(
+                "securitycraft: the passcode trapdoor part was refused: {error}"
+            ));
+            return;
+        }
+        r.block_part(trapdoor, TrapdoorBlock);
+        let trapdoor_item = r.item_key(support::TRAPDOOR);
+        r.item_part(trapdoor_item, TrapdoorItem);
         // A removal hook only has a `LevelHost`, which cannot resolve an id, so the
         // keys of all four droppable modules are stored once here.
         let harming_module = r.item_key(support::HARMING_MODULE);

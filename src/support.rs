@@ -34,9 +34,10 @@ use mod_api::{
 use crate::runtime::{
     Action, Button, CookKind, DEFAULT_SIGNAL_TICKS, Entry, FURNACE_FUEL, FURNACE_INPUT,
     FURNACE_OUTPUT, FURNACE_SLOTS, FurnaceState, FurnaceTick, ListData, Mode, Throttle,
-    after_submit, button, container_access, cooldown_allows, cooldown_failed, disguise_tint,
-    facing_from_yaw, furnace_access, furnace_tick, hash_code, is_allowed, is_denied, may_install,
-    may_set_code, new_salt, tick_signal, valid_code, wrong_code_damage,
+    TrapdoorChange, after_submit, button, container_access, cooldown_allows, cooldown_failed,
+    disguise_tint, facing_from_yaw, furnace_access, furnace_tick, hash_code, is_allowed, is_denied,
+    may_install, may_set_code, new_salt, tick_signal, trapdoor_access, trapdoor_tick, valid_code,
+    wrong_code_damage,
 };
 
 /// The keypad block; its item (`securitycraft:keypad_item`) places it.
@@ -62,6 +63,11 @@ pub(crate) const SMOKER: &str = "securitycraft:keypad_smoker";
 pub(crate) const SMOKER_ENTITY: &str = "keypad_smoker";
 /// The smoker's three-slot content menu.
 pub(crate) const SMOKER_MENU: &str = "securitycraft:keypad_smoker";
+/// The passcode trapdoor (`securitycraft:keypad_trapdoor`), carried as a
+/// `minecraft:iron_trapdoor` template with a saved owner/code and an `open` flip.
+pub(crate) const TRAPDOOR: &str = "securitycraft:keypad_trapdoor";
+/// The block entity type of the passcode trapdoor.
+pub(crate) const TRAPDOOR_ENTITY: &str = "keypad_trapdoor";
 /// The vanilla 9×3 menu the barrel's 27 slots open, so hoppers, comparators,
 /// shift-clicks and a relaunch use the game's own container paths.
 pub(crate) const CONTAINER_MENU: &str = "securitycraft:keypad_barrel";
@@ -554,6 +560,41 @@ pub(crate) fn on_tick(host: &mut dyn ServerHost, event: &mut BlockEntityTickEven
     if fields.data != slots {
         fields.data = slots;
     }
+}
+
+/// One passcode-trapdoor tick: upstream's `KeypadTrapDoorBlock.tick` clears
+/// `open` when the scheduled `signalLength` (default 60) elapses. The countdown
+/// is saved, so a trapdoor opened just before a relaunch still closes on time.
+pub(crate) fn on_trapdoor_tick(host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
+    let pos = event.pos;
+    let fields = &mut *event.entity;
+    let signal = int(&fields.nbt, KEY_SIGNAL);
+    if signal <= 0 {
+        return;
+    }
+    let (next, closes) = trapdoor_tick(signal);
+    set_int(&mut fields.nbt, KEY_SIGNAL, next);
+    if closes {
+        set_int(&mut fields.nbt, KEY_OPEN, 0);
+        host.set_block_property(pos, "open", "false");
+    }
+}
+
+/// A right click on the passcode trapdoor. Upstream's `useWithoutItem` answers
+/// `PASS` for an already-open trapdoor with a signal length; an iron trapdoor
+/// never opens by hand, and the port's code entry is the harness command
+/// `/securitycraft cset|copen` (a headless harness cannot type into a second
+/// drawn panel). Letting the carried template handle the click is faithful:
+/// a vanilla iron trapdoor also ignores a hand click.
+pub(crate) fn on_trapdoor_use(
+    host: &mut dyn ServerHost,
+    click: &mod_api::BlockClick<'_>,
+) -> Option<InteractionResult> {
+    let level = in_place_level(host)?;
+    if level.block_property(&*host, click.pos, "open").as_deref() == Some("true") {
+        return Some(InteractionResult::Pass);
+    }
+    None
 }
 
 /// A player uses the keypad: a powered keypad does nothing (upstream's
@@ -1484,6 +1525,7 @@ fn passcode_label(block: &str) -> Option<&'static str> {
         CONTAINER => Some("barrel"),
         FURNACE => Some("furnace"),
         SMOKER => Some("smoker"),
+        TRAPDOOR => Some("trapdoor"),
         _ => None,
     }
 }
@@ -1549,7 +1591,33 @@ fn unlock_container(
         .ok_or_else(|| format!("No passcode {label} at that position."))?;
     let stored = string(&data, KEY_CODE);
     let salt = string(&data, KEY_SALT).unwrap_or_default();
-    if block == FURNACE || block == SMOKER {
+    if block == TRAPDOOR {
+        match trapdoor_access(
+            owner_of(&data),
+            asking.unwrap_or(0),
+            stored.as_deref(),
+            &salt,
+            code,
+            DEFAULT_SIGNAL_TICKS,
+        ) {
+            TrapdoorChange::Opened(ticks) => {
+                set_int(&mut data, KEY_SIGNAL, ticks);
+                // Upstream's `activate` cycles the OPEN state of the block; the
+                // harness reads that property back with `ctl block`, never the
+                // absence of an error from this command.
+                host.set_block_property(pos, "open", "true");
+            }
+            TrapdoorChange::Unchanged => {
+                return Err(if owner_of(&data) != asking {
+                    format!("Only the {label}'s owner may enter its code.")
+                } else if stored.is_none() {
+                    format!("The {label} has no code set.")
+                } else {
+                    "Wrong code.".to_owned()
+                });
+            }
+        }
+    } else if block == FURNACE || block == SMOKER {
         if !furnace_access(
             owner_of(&data),
             asking.unwrap_or(0),
@@ -1620,6 +1688,34 @@ fn container_info(host: &dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Opti
         } else {
             "false"
         },
+    ))
+}
+
+/// `/securitycraft cinfo <pos>` for a passcode trapdoor: the `open` it reports is
+/// the block's own state, read back from the game, not the command's answer. A
+/// harness addition, like every other passcode readout in this port.
+fn trapdoor_info(host: &dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Option<String> {
+    if block_at(host, level, pos) != TRAPDOOR {
+        return None;
+    }
+    let entity = host.block_entity(level, pos)?;
+    let data = entity.data(host)?;
+    let open = level
+        .block_property(host, pos, "open")
+        .unwrap_or_else(|| "unknown".to_owned());
+    Some(format!(
+        "securitycraft trapdoor {} {} {} code={} open={} owner={} signal={}",
+        pos[0],
+        pos[1],
+        pos[2],
+        if has(&data, KEY_CODE) { "set" } else { "none" },
+        open,
+        if owner_of(&data).is_some() {
+            "set"
+        } else {
+            "none"
+        },
+        int(&data, KEY_SIGNAL),
     ))
 }
 
@@ -2121,7 +2217,13 @@ pub(crate) fn command(
                 .into_iter()
                 .find(|level| level.dimension() == invocation.dimension)?;
             match literals[1] {
-                "cinfo" => container_info(host, level, pos),
+                "cinfo" => {
+                    if block_at(host, level, pos) == TRAPDOOR {
+                        trapdoor_info(host, level, pos)
+                    } else {
+                        container_info(host, level, pos)
+                    }
+                }
                 "cset" => {
                     let Some(mod_api::CommandArgumentValue::String(code)) =
                         invocation.argument("code")
@@ -2433,6 +2535,18 @@ mod tests {
         assert!(
             container.faces.iter().all(|face| face.len() == 3),
             "every face reaches the three slots, as a vanilla smoker does"
+        );
+    }
+
+    #[test]
+    fn the_passcode_trapdoor_has_its_own_id_and_readout_label() {
+        assert_eq!(TRAPDOOR, "securitycraft:keypad_trapdoor");
+        assert_eq!(TRAPDOOR_ENTITY, "keypad_trapdoor");
+        assert_eq!(passcode_label(TRAPDOOR), Some("trapdoor"));
+        assert_eq!(
+            passcode_label(CONTAINER),
+            Some("barrel"),
+            "the other passcode families keep their labels"
         );
     }
 

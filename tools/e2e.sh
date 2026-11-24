@@ -85,6 +85,8 @@
 #   SELFTEST=container tools/e2e.sh # phase 19 expects a locked barrel's slots: exit 1
 #   SELFTEST=furnace tools/e2e.sh  # phase 20 expects a wrong code to leave the furnace's slots: exit 1
 #   SELFTEST=smoker tools/e2e.sh   # phase 21 expects a wrong code to leave the smoker's slots: exit 1
+#   SELFTEST=keypad-trapdoor tools/e2e.sh  # phase 22 expects a wrong code to OPEN the trapdoor: exit 1
+#   (SELFTEST=keypad-door is the same inverted assertion, named for the whole door family)
 #   CONTROL=1 tools/e2e.sh     # no package at all: the ids must be unknown
 #   GAME=<an unmodified game> tools/e2e.sh   # the differential: the first phase fails
 #
@@ -1630,6 +1632,94 @@ echo "smoker output slot 302 after the relaunch: $reloaded_smoker"
 [ "$reloaded_smoker" = minecraft:cooked_beef ] \
     || fail "the smoker lost its cooked output across the relaunch ($reloaded_smoker)"
 ctl close >/dev/null 2>&1 || true
+
+say "phase 22: the passcode trapdoor opens only for its owner's code and closes on its tick"
+# The jar's keypad_trapdoor is carried as a minecraft:iron_trapdoor template: the artefact's
+# 16 facing/half/open variants, three static block models and its texture. Upstream's
+# KeypadTrapDoorBlock.useWithoutItem gates on the saved owner/code, `activate` cycles OPEN and
+# schedules the off tick after signalLength (60), and `tick` clears it. A vanilla iron
+# trapdoor beside it opens on redstone with no code at all — the differential. The block's
+# state is parsed from `ctl block`, never inferred from a command's answer.
+CURX=$(ctl state | jq -r '.player.position[0] | floor')
+CURZ=$(ctl state | jq -r '.player.position[2] | floor')
+TRAPX=$((CURX+2)); TRAPY=101; TRAPZ=$((CURZ+1))
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl wait 2
+ctl give minecraft:iron_trapdoor 1 >/dev/null || fail "the game refused a vanilla iron trapdoor"
+ctl give securitycraft:keypad_trapdoor 1 >/dev/null || fail "the game refused securitycraft:keypad_trapdoor: the package is not loaded"
+ctl wait 6
+ctl close >/dev/null 2>&1 || true
+ctl wait 2 >/dev/null
+# The earlier phases' platform does not reach every candidate spot, and a
+# trapdoor needs a solid face to be placed against. Give this rig its own floor.
+ctl command "setblock $TRAPX $((TRAPY-1)) $TRAPZ minecraft:stone" >/dev/null
+ctl command "setblock $TRAPX $TRAPY $TRAPZ minecraft:air" >/dev/null
+ctl wait 4
+echo "trapdoor rig floor: $(block_name "$TRAPX" "$((TRAPY-1))" "$TRAPZ")"
+
+# Differential: a vanilla iron trapdoor opens on a redstone signal with no code.
+ctl select minecraft:iron_trapdoor >/dev/null
+reply=$(ctl place "$TRAPX" "$TRAPY" "$TRAPZ" 2>&1 || true)
+echo "vanilla trapdoor place reply: $reply"
+echo "$reply" | jq -e '.changed == true' >/dev/null || fail "the vanilla iron trapdoor did not place ($reply)"
+ctl wait 4
+echo "vanilla iron trapdoor before redstone: $(block_state "$TRAPX" "$TRAPY" "$TRAPZ")"
+ctl command "setblock $TRAPX $((TRAPY-1)) $TRAPZ minecraft:redstone_block" >/dev/null
+ctl wait 10
+vanilla_trap_state=$(block_state "$TRAPX" "$TRAPY" "$TRAPZ")
+echo "vanilla iron trapdoor on redstone: $vanilla_trap_state"
+echo "$vanilla_trap_state" | grep -q 'open=true' \
+    || fail "a vanilla iron trapdoor did not open on redstone ($vanilla_trap_state)"
+ctl command "setblock $TRAPX $((TRAPY-1)) $TRAPZ minecraft:air" >/dev/null
+ctl command "setblock $TRAPX $TRAPY $TRAPZ minecraft:air" >/dev/null
+# The redstone block replaced the floor; put the solid face back for the
+# passcode trapdoor's placement (the block entity belongs to that placement).
+ctl command "setblock $TRAPX $((TRAPY-1)) $TRAPZ minecraft:stone" >/dev/null
+ctl wait 4
+
+ctl select securitycraft:keypad_trapdoor >/dev/null
+reply=$(ctl place "$TRAPX" "$TRAPY" "$TRAPZ" 2>&1 || true)
+echo "passcode trapdoor place reply: $reply"
+echo "$reply" | jq -e '.changed == true' >/dev/null || fail "the passcode trapdoor did not place ($reply)"
+ctl wait 4
+block_name "$TRAPX" "$TRAPY" "$TRAPZ" | grep -qx securitycraft:keypad_trapdoor \
+    || fail "no passcode trapdoor at $TRAPX,$TRAPY,$TRAPZ"
+echo "trapdoor after place: $(block_state "$TRAPX" "$TRAPY" "$TRAPZ")"
+
+tcmd() { ctl chat "/securitycraft $1 $TRAPX $TRAPY $TRAPZ $2" 2>&1; ctl wait 4; }
+tinfo() { ctl chat "/securitycraft cinfo $TRAPX $TRAPY $TRAPZ" >/dev/null; ctl wait 4; ctl messages 8 | jq -r '.chat[]' | grep -m1 '^securitycraft trapdoor ' || true; }
+reply=$(tcmd cset 2468); echo "trapdoor code set reply: $(echo "$reply" | jq -r '.chat[0] // .error // .' 2>/dev/null)"
+line=$(tinfo); echo "coded trapdoor: $line"
+[ "$(field code "$line")" = set ] || fail "the trapdoor did not save its code: $line"
+[ "$(field open "$line")" = false ] || fail "a fresh coded trapdoor is already open: $line"
+[ "$(field owner "$line")" = set ] || fail "the trapdoor's placer is not its owner: $line"
+
+reply=$(tcmd copen 9999); echo "wrong trapdoor code reply: $(echo "$reply" | jq -r '.chat[0] // .error // .' 2>/dev/null)"
+wrong_trap_state=$(block_state "$TRAPX" "$TRAPY" "$TRAPZ")
+echo "trapdoor state after a wrong code: $wrong_trap_state"
+if [ "$SELFTEST" = keypad-door ] || [ "$SELFTEST" = keypad-trapdoor ]; then
+    echo "$wrong_trap_state" | grep -q 'open=true' \
+        || fail "SELFTEST: expected the trapdoor OPEN after a wrong code"
+fi
+echo "$wrong_trap_state" | grep -q 'open=false' \
+    || fail "a wrong code opened the trapdoor ($wrong_trap_state)"
+
+reply=$(tcmd copen 2468); echo "right trapdoor code reply: $(echo "$reply" | jq -r '.chat[0] // .error // .' 2>/dev/null)"
+right_trap_state=$(block_state "$TRAPX" "$TRAPY" "$TRAPZ")
+echo "trapdoor state after the right code: $right_trap_state"
+echo "$right_trap_state" | grep -q 'open=true' \
+    || fail "the right code did not open the trapdoor ($right_trap_state)"
+line=$(tinfo); echo "trapdoor after the right code: $line"
+[ "$(field open "$line")" = true ] || fail "the readout did not follow the block state: $line"
+ctl wait 90
+closed_trap_state=$(block_state "$TRAPX" "$TRAPY" "$TRAPZ")
+echo "trapdoor state after its signal: $closed_trap_state"
+echo "$closed_trap_state" | grep -q 'open=false' \
+    || fail "the trapdoor did not close when its signal ran out ($closed_trap_state)"
+ctl close >/dev/null 2>&1 || true
+
+echo "PASS-trapdoor: the passcode trapdoor saved its owner and code, a wrong code left its block state open=false, the owner's right code flipped it to open=true, and its scheduled tick closed it again; a vanilla iron trapdoor beside it opened on redstone with no code"
 
 echo "PASS-smoker: the passcode smoker saved its owner and code, a wrong code left no menu and no slots, the right code opened its three-slot block-backed menu, raw iron did not cook while beef smoked into one cooked_beef with the input consumed and lit=true, and the code and output survived a relaunch; an unprotected vanilla smoker opened with no code"
 

@@ -508,6 +508,41 @@ pub fn container_access(
     }
 }
 
+/// What a submitted code does to a passcode trapdoor.
+///
+/// Upstream's `KeypadTrapDoorBlock.activate` cycles the `open` state and schedules
+/// an off tick after `signalLength` (default 60); an incorrect entry changes
+/// nothing. The door family shares the same rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrapdoorChange {
+    /// No verdict: `open` is left as it is.
+    Unchanged,
+    /// The owner typed the right code: flip `open` and count down these ticks.
+    Opened(i32),
+}
+
+/// The pure access-and-flip rule of a carried passcode trapdoor (or door).
+#[must_use]
+pub fn trapdoor_access(
+    owner: Option<u128>,
+    player: u128,
+    stored: Option<&str>,
+    salt_hex: &str,
+    entered: &str,
+    signal_ticks: i32,
+) -> TrapdoorChange {
+    match container_access(owner, player, stored, salt_hex, entered) {
+        ContainerAccess::Open => TrapdoorChange::Opened(signal_ticks),
+        _ => TrapdoorChange::Unchanged,
+    }
+}
+
+/// One tick of a trapdoor's open countdown, upstream's `tick` clearing `open`.
+#[must_use]
+pub fn trapdoor_tick(remaining: i32) -> (i32, bool) {
+    tick_signal(remaining)
+}
+
 fn encode_hex(bytes: &[u8]) -> String {
     let mut hex = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -820,6 +855,65 @@ mod tests {
     /// The salt the in-game path draws is 16 bytes; tests use a fixed one.
     const SALT: &str = "000102030405060708090a0b0c0d0e0f";
     const OTHER_SALT: &str = "ffeeddccbbaa99887766554433221100";
+    const OWNER: u128 = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef;
+    const STRANGER: u128 = 0xdead_beef_dead_beef_dead_beef_dead_beef;
+
+    #[test]
+    fn a_right_code_flips_a_trapdoor_and_a_wrong_one_changes_nothing() {
+        let stored = hash_code("1234", SALT).unwrap();
+        assert_eq!(
+            trapdoor_access(
+                Some(OWNER),
+                OWNER,
+                Some(&stored),
+                SALT,
+                "1234",
+                DEFAULT_SIGNAL_TICKS,
+            ),
+            TrapdoorChange::Opened(DEFAULT_SIGNAL_TICKS),
+            "the owner's right code opens the trapdoor for signalLength ticks"
+        );
+        assert_eq!(
+            trapdoor_access(
+                Some(OWNER),
+                OWNER,
+                Some(&stored),
+                SALT,
+                "9999",
+                DEFAULT_SIGNAL_TICKS,
+            ),
+            TrapdoorChange::Unchanged,
+            "a wrong code leaves the trapdoor closed"
+        );
+        assert_eq!(
+            trapdoor_access(
+                Some(OWNER),
+                STRANGER,
+                Some(&stored),
+                SALT,
+                "1234",
+                DEFAULT_SIGNAL_TICKS,
+            ),
+            TrapdoorChange::Unchanged,
+            "a stranger cannot open it even with the right digits"
+        );
+        assert_eq!(
+            trapdoor_access(Some(OWNER), OWNER, None, SALT, "1234", DEFAULT_SIGNAL_TICKS),
+            TrapdoorChange::Unchanged,
+            "an unset trapdoor cannot be opened"
+        );
+    }
+
+    #[test]
+    fn a_trapdoor_closes_when_its_signal_length_elapses() {
+        assert_eq!(trapdoor_tick(2), (1, false));
+        assert_eq!(trapdoor_tick(1), (0, true), "the last tick clears `open`");
+        assert_eq!(
+            trapdoor_tick(0),
+            (0, false),
+            "a closed trapdoor stays closed"
+        );
+    }
 
     #[test]
     fn a_smoker_cooks_against_the_smoking_recipe_table() {

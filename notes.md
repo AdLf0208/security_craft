@@ -2759,3 +2759,190 @@ owner with `cset`, confirm a wrong `copen` leaves the door `open=false` and a ri
 `SELFTEST=keypad-door` must invert the wrong-code/closed assertion and end `EXIT:1`. The
 universal block modifier and the reinforced-block family stay behind it; the chest remains
 `blocked(register_block_entity_renderers)`.
+
+## Slice 13 — the keypad trapdoor (2026-11-24, SDK `0a875da`) — 0.2.13
+
+**Slice and gap line.** The brief's own line, from slice 12's `## Next slice` and the port's gap
+list: *"the passcode chest/barrel/furnace/smoker, **keypad door and trapdoor**"* now that the
+furnace/smoker pair is closed. The chest stays `blocked(register_block_entity_renderers)` (slice 10,
+measured); **do not retry it**. This slice takes the **keypad trapdoor**
+(`securitycraft:keypad_trapdoor`). Class **content**, tier **deep** in the ledger; the delivered
+shape is the port's existing **logic + machines** half (a block with saved owner/code, a code-gated
+`open` flip and a closing tick) plus one carried block — no menu, renderer or new hook kind.
+
+**Inventory gate first (the brief's stop condition).** Evidence:
+[`slice12-keypad-door-inventory.log`](../../_shared/evidence/securitycraft/slice12-keypad-door-inventory.log).
+Every door/trapdoor model in the jar (keypad, reinforced and scanner families, 37 files) was
+scanned: **not one is `builtin/entity`** — all are static JSON meshes parented to vanilla
+`block/door_*` / `block/template_trapdoor_*` models, and the three trapdoor parents exist in the
+prepared 26.3 root. The jar's blockstates match 26.3 exactly: `keypad_door` 32 variants
+(`facing`×`half`×`hinge`×`open`) = `iron_door`, `keypad_trapdoor` 16
+(`facing`×`half`×`open`) = `iron_trapdoor`. Neither declares `powered`. **No renderer is needed,
+no property is inexpressible → no `blocked` symbol.**
+
+**Choice — the trapdoor first, because it is the cheaper expressible one.** 16 blockstate
+variants against the door's 32, three static block models against eight, one block texture against
+three, and a single block against a double-high two-block placement with `half`/`hinge`; the same
+owner/code rule and harness commands cover both. The door is the next slice.
+
+**The artefact's exact rule** (`KeypadTrapDoorBlock.java` / `KeypadTrapdoorBlockEntity.java`,
+commit `c4d35b0c`, read for behaviour only): `useWithoutItem` answers `PASS` for an already-open
+trapdoor with a signal length, checks `verifyPasscodeSet`, denies before allowing, then opens the
+code screen; on a match `activate` cycles `OPEN`, plays the sound and schedules the off tick after
+`signalLength` (default 60), and `tick` clears `OPEN`. `neighborChanged` is a **no-op**: the keypad
+trapdoor never opens on redstone, while a vanilla iron trapdoor does — that is the differential.
+`signalLength` is not configurable in this port (deviation below).
+
+### Red proof (TDD, before the rule existed)
+
+`src/runtime.rs` gained `TrapdoorChange`, `trapdoor_access` and `trapdoor_tick` with stubs that
+kept the old behaviour, and two tests first. Forwarded `cargo test --offline`
+([`slice12-red.log`](../../_shared/evidence/securitycraft/slice12-red.log)):
+
+```
+---- runtime::tests::a_right_code_flips_a_trapdoor_and_a_wrong_one_changes_nothing stdout ----
+thread 'runtime::tests::a_right_code_flips_a_trapdoor_and_a_wrong_one_changes_nothing' panicked at src/runtime.rs:863:9:
+assertion `left == right` failed: the owner's right code opens the trapdoor for signalLength ticks
+  left: Unchanged
+ right: Opened(60)
+
+---- runtime::tests::a_trapdoor_closes_when_its_signal_length_elapses stdout ----
+thread 'runtime::tests::a_trapdoor_closes_when_its_signal_length_elapses' panicked at src/runtime.rs:908:9:
+assertion `left == right` failed
+  left: (0, false)
+ right: (1, false)
+
+test result: FAILED. 61 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+The rules became `container_access` → `TrapdoorChange::Opened(signal_ticks)` only for the owner's
+matching digest, and `trapdoor_tick = tick_signal`; all **64** tests pass.
+
+### What the slice implements
+
+- **Pure rules** (`runtime::TrapdoorChange`, `trapdoor_access`, `trapdoor_tick`): the owner-then-
+  salted-SHA-256 verdict already proved for the containers, plus the artefact's flip and countdown.
+- **Content**: `securitycraft:keypad_trapdoor` — the jar's block/item ids, byte-for-byte 16-state
+  blockstate, three block models, item model and 532-byte texture, simplified loot, lang and
+  creative-tab entry, pickaxe tag; a `minecraft:iron_trapdoor` template with the JAR's hardness,
+  metal sounds and tool rule.
+- **The gate** (`support::unlock_container`): `/securitycraft copen` calls the new rule; only a
+  right code sets the saved countdown and `host.set_block_property(pos, "open", "true")`. A wrong
+  code writes nothing, so `ctl block` still reads `open=false`. `/securitycraft cset` and `cinfo`
+  dispatch by id; `cinfo` reports the block's own `open` state, parsed from the game, not the
+  command's answer.
+- **The close tick** (`support::on_trapdoor_tick`, a `BlockEntityPart` on its own block-entity
+  type): when the saved 60 ticks elapse it clears `open` and the one-shot permission, as
+  upstream's scheduled block tick does.
+- **Right click** (`support::on_trapdoor_use`): an open trapdoor answers `PASS`; an iron trapdoor
+  never opens by hand, so the carried template handles the rest (a headless harness cannot type
+  into a second drawn panel — the established harness-command convention).
+
+### Verification (0.2.13, SDK `0a875da`, 2026-11-24)
+
+Every Rust step ran through **forwarded** `build-slot.sh` leases on `AdLf-PC`
+(`build-slot: forwarding … to the remote runner`, relative `--port ports/securitycraft`,
+`CARGO_INCREMENTAL=0`, **no `BUILD_LOCAL=1`**); the launcher build and the game legs stayed local
+(the e2e is `--offscreen`). Evidence under `../_shared/evidence/securitycraft/` and
+`../_shared/evidence/securitycraft-e2e/`.
+
+| Check | Evidence | Result |
+|---|---|---|
+| Inventory gate | `slice12-keypad-door-inventory.log` | 37 models `CLEAN`; jar props = 26.3 props; no renderer |
+| Red | `slice12-red.log` | **61 passed / 2 failed**, both new assertions (`Unchanged`/`Opened(60)`, `(0,false)`/`(1,false)`) |
+| Tests | `slice12-test.log`, `sdk-test.log` (regenerated on the final tree) | **64 passed**, 0 failed |
+| Format + lints | `slice12-lint.log`, `slice12-clippy.log` | fmt clean, clippy exit 0, **0 warnings** |
+| Two builds + `cmp` | `slice12-build.log` | **byte-identical**; `rm -f Cargo.lock` before each |
+| Delivered | `securitycraft.hmod` | **106,065 B**, SHA-256 `5f8857c08e6ab2168f8932b63512b2a39b7d7fa78c24770e8e97fc497ad74814`, **115 entries**, no `Cargo.lock`, version 0.2.13 |
+| Registry check | `slice12-check-fits.log` | `securitycraft 0.2.13 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, same SHA, EXIT 0 |
+| `fits --build 0a875da` | `slice12-check-fits.log` | `0a875da  made for`, EXIT 0 |
+| `fits --build 0b14f8a` | `slice12-check-fits.log` | `0b14f8a  fits`, EXIT 0, same SHA |
+| Gate | `slice12-verify-sdk-package.log` | **1/1**, `package matches the tree`, SDK-only deps (R9), no lock, 64 tests |
+| Launcher build | `slice12-launcher-build.log` | `Compiling securitycraft (1 of 1)`, `native-0a875da-dc1e93ff95ab built` |
+| In-game PASS | `securitycraft-e2e/e2e-launcher.log` | **PASS + `EXIT:0`**, all 22 phases incl. phase 22 |
+| Control (unmodified Nightly) | `e2e-control.log` | **`EXIT:1`** at phase 1 |
+| Ids-unknown control | `e2e-ids-unknown.log` | PASS + `EXIT:0`, ids unknown |
+| SELFTEST (keypad trapdoor) | `e2e-selftest-keypad-trapdoor.log` | **`EXIT:1`** at phase 22, "expected the trapdoor OPEN after a wrong code" |
+| SELFTEST (`keypad-door` alias) | `e2e-selftest-keypad-door.log` | **`EXIT:1`** at the same inverted phase-22 assertion |
+| Prior SELFTEST (`1` door) | `e2e-selftest.log` | **`EXIT:1`** at phase 4, "expected the door OPEN after a wrong code" |
+| Other prior SELFTESTs | `e2e-selftest*.log` | **`EXIT:1`** at each own assertion (logs kept green) |
+| Log checker | `slice12-check-e2e-logs.log` | `logs=27 ok=27`, exit 0 |
+| Recipe types | `slice12-check-recipe-types.log` | `securitycraft: ok`, exit 0 |
+
+Phase 22 in the PASS leg (`e2e-launcher.log`):
+
+```
+vanilla iron trapdoor on redstone: minecraft:iron_trapdoor[facing=south,half=bottom,open=true,powered=true,waterlogged=false]
+trapdoor after place: securitycraft:keypad_trapdoor[facing=west,half=bottom,open=false,powered=false,waterlogged=false]
+securitycraft trapdoor 17 101 9 code=set open=false owner=set signal=0
+trapdoor state after a wrong code: securitycraft:keypad_trapdoor[facing=west,half=bottom,open=false,powered=false,waterlogged=false]
+trapdoor state after the right code: securitycraft:keypad_trapdoor[facing=west,half=bottom,open=true,powered=false,waterlogged=false]
+trapdoor state after its signal: securitycraft:keypad_trapdoor[facing=west,half=bottom,open=false,powered=false,waterlogged=false]
+PASS-trapdoor: the passcode trapdoor saved its owner and code, a wrong code left its block state open=false, the owner's right code flipped it to open=true, and its scheduled tick closed it again; a vanilla iron trapdoor beside it opened on redstone with no code
+```
+
+Every assertion is on the parsed `ctl block` state; `SELFTEST=keypad-trapdoor` and its
+`keypad-door` alias invert the wrong-code/closed assertion and fail exactly there. `ctl messages`
+stays at **8** throughout. Three pre-existing harness placement flakes (phase 17 twice, phase 14
+twice) stopped intermediate legs before their own assertions; each identical leg was retried
+unchanged and the flake logs are kept (`e2e-trapdoor-flake-17.log`, `e2e-trapdoor-flake-14.log`,
+`e2e-selftest-keypad-door-flake-14.log`) — none is called green. The earlier transient syntax
+typo in the new phase was fixed before these legs; its log is the same PASS evidence above.
+
+### Coverage added by this slice
+
+| Family | Status |
+|---|---|
+| `securitycraft:keypad_trapdoor` block/item (give, place, read back) | **tested** — phase 22: `block_name` and parsed `block_state` |
+| owner recorded on placement, first code saved | **tested** — phase 22: `owner=set`, `code=set` |
+| wrong code → `open=false` | **tested** — phase 22: parsed block state; inverted by both trapdoor SELFTESTs |
+| right code → `open=true` | **tested** — phase 22: parsed block state, readout `open=true` |
+| scheduled close after `signalLength` | **tested** — phase 22: `open=false` after 90 ticks |
+| redstone differential (vanilla iron trapdoor opens, keypad trapdoor ignores redstone) | **tested** — phase 22: vanilla `open=true` with no code |
+| artefact's no-op `neighborChanged` | **unit test** `a_right_code_flips_a_trapdoor_and_a_wrong_one_changes_nothing` + the PASS leg's unchanged state while redstone was present |
+| keypad door, universal block modifier, reinforced-block family | **not ported** — next gap lines |
+| keypad chest | **`blocked(register_block_entity_renderers)`** — slice 10, unchanged |
+
+### Deviations recorded by this slice
+
+1. **The code check is a harness command** (`cset`/`copen`/`cinfo`), as for the barrel, furnace and
+   smoker; a headless harness cannot type into upstream's second drawn check panel.
+2. **`signalLength` is fixed at the upstream default 60** and not configurable; the port's config
+   file remains a gap. The saved countdown survives a relaunch (the tick is on the block entity).
+3. **No `open` sound, disguise module, allowlist/denylist modules or `disabled` option** on the
+   trapdoor; upstream's module inventory and disguise state on that block are a gap, as on the
+   other carried containers.
+4. **The item model is the jar's, the block declaration uses the `minecraft:iron_trapdoor`
+   template**; its `powered`/`waterlogged` states are template states, not the mod's own (the jar's
+   blockstate has none), and are never driven by the port.
+
+### Changelog for the resubmission (0.2.13)
+
+> Supersedes #1805→0.2.12 (the staged PR). Carries the jar's `keypad_trapdoor` (16-state
+> blockstate, three static block models, texture and lang on a `minecraft:iron_trapdoor` template)
+> as a code-gated trapdoor: the placer owns it, only the owner may set the first code, a wrong
+> `copen` leaves its `open` state false, the right one flips it true, and a saved 60-tick countdown
+> closes it — while a vanilla iron trapdoor opens on redstone with no code. New pure
+> `trapdoor_access`/`trapdoor_tick` rules and their inverted in-game leg prove it. The salted
+> SHA-256, SDK-only dependency set, save format, deny-before-allow order, smart gate and disguise
+> render are unchanged.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-review, rust-port
+
+## Next slice
+
+**Family:** the **keypad door** (`securitycraft:keypad_door`), the other half of the same gap line
+(*"…keypad door and trapdoor"*) now that the trapdoor is proved. It fits tier **deep** in the same
+logic+machines shape: the jar's 32 `facing`/`half`/`hinge`/`open` blockstate matches 26.3's
+`iron_door` exactly and all eight door models are static meshes (inventory gate evidence in
+`slice12-keypad-door-inventory.log`), so the same `trapdoor_access`/`trapdoor_tick` rules, one-shot
+gate and harness commands can drive a double-high carried door; only the block/item content and the
+two-block placement differ. The cheap trapdoor was done first so the door reuses a proved path.
+
+**In-game assertion that would prove it:** place a passcode door, `cset` its code as owner, confirm a
+wrong `copen` leaves `open=false` and the right one flips both halves to `open=true` in the parsed
+block state, then the scheduled tick closes it; a vanilla iron door beside the player opens on
+redstone with no code (differential). `SELFTEST=keypad-door-full` must invert the wrong-code/closed
+assertion and end `EXIT:1` (the existing `keypad-door` name is taken by the trapdoor alias). The
+universal block modifier and the reinforced-block family stay behind it; the chest remains
+`blocked(register_block_entity_renderers)` until the pin stamps a block-entity renderer surface.

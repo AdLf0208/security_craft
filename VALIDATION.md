@@ -1,6 +1,49 @@
 # Validation
 
-The current package is the flat SDK package (mod API 0.2) at version **0.2.12** (the passcode
+The current package is the flat SDK package (mod API 0.2) at version **0.2.13** (the keypad
+trapdoor slice), validated on Linux with rustc 1.95.0 on 2026-11-24 against Horizon
+`0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. All Rust steps ran through **forwarded**
+`ports/tools/build-slot.sh` leases on `AdLf-PC`; the launcher build and game legs stayed local
+(the e2e is `--offscreen`). `CARGO_INCREMENTAL=0` throughout; **no `BUILD_LOCAL=1`**. Evidence is
+under `../_shared/evidence/securitycraft/` and `../_shared/evidence/securitycraft-e2e/`.
+
+## Slice 13 — the keypad trapdoor (0.2.13)
+
+| Check | Result |
+|---|---|
+| Inventory gate (37 door/trapdoor models, jar props vs 26.3) | all `CLEAN`; `keypad_door` 32/`keypad_trapdoor` 16 variants = vanilla; no renderer (`slice12-keypad-door-inventory.log`) |
+| Red (`trapdoor_access`/`trapdoor_tick` stubbed) | **61 passed / 2 failed** — `Unchanged`/`Opened(60)` and `(0,false)`/`(1,false)` (`slice12-red.log`) |
+| `cargo test --offline` | **64 passed**, 0 failed (`slice12-test.log`, `sdk-test.log` regenerated on the final 0.2.13 tree) |
+| `cargo fmt --check` + `cargo clippy --all-targets --offline -- -D warnings` | Pass, 0 warnings (`slice12-lint.log`, `slice12-clippy.log`) |
+| Two `cargo horizon-mod build`s + `cmp` | byte-identical, `rm -f Cargo.lock` before each (`slice12-build.log`) |
+| `cargo horizon-mod check securitycraft.hmod` | `0.2.13 (native-mod, … for 26.3)`, EXIT 0 (`slice12-check-fits.log`) |
+| `fits --build 0a875da` / `--build 0b14f8a` | `made for` / `fits`, delivered SHA in both (`slice12-check-fits.log`) |
+| `verify-sdk-package.py securitycraft` | 1/1, `package matches the tree`, 64 tests, SDK-only deps, no lock (`slice12-verify-sdk-package.log`) |
+| Launcher build | `Compiling securitycraft (1 of 1)`, `native-0a875da-dc1e93ff95ab built` (`slice12-launcher-build.log`) |
+| In-game scenario (`tools/e2e.sh`, launcher-built game) | **PASS + `EXIT:0`**, all 22 phases incl. phase 22 (`securitycraft-e2e/e2e-launcher.log`) |
+| Control (unmodified Nightly) | `EXIT:1` at phase 1 (`e2e-control.log`) |
+| Ids-unknown control (`CONTROL=1`) | PASS + `EXIT:0`, ids unknown (`e2e-ids-unknown.log`) |
+| SELFTEST (keypad trapdoor / `keypad-door` alias) | `EXIT:1` at phase 22, "expected the trapdoor OPEN after a wrong code" (`e2e-selftest-keypad-trapdoor.log`, `e2e-selftest-keypad-door.log`) |
+| Prior SELFTEST (`1`) | `EXIT:1` at phase 4, "expected the door OPEN after a wrong code" (`e2e-selftest.log`) |
+| `check-e2e-logs.py securitycraft-e2e --strict` | `logs=27 ok=27`, exit 0 (`slice12-check-e2e-logs.log`) |
+| `check-recipe-types.py securitycraft` | `securitycraft: ok`, exit 0 (`slice12-check-recipe-types.log`) |
+
+The delivered package is `securitycraft.hmod` **106,065 B**, SHA-256
+`5f8857c08e6ab2168f8932b63512b2a39b7d7fa78c24770e8e97fc497ad74814`, **115 entries**, version
+**0.2.13**, SDK-only dependency set (R9) and no packed `Cargo.lock`. The launcher build printed
+`Compiling securitycraft (1 of 1)` after the manifest bump; `sdk-test.log` was regenerated on the
+final 0.2.13 tree (64 tests) before the last `verify-sdk-package.py` run, which reports
+`package matches the tree`.
+
+Phase 22 proves the carried `keypad_trapdoor`: a vanilla iron trapdoor opens on redstone with no
+code; a wrong `copen` leaves the passcode trapdoor's parsed block state `open=false`; the owner's
+right code flips it to `open=true`; and its scheduled 60-tick countdown closes it again.
+`SELFTEST=keypad-trapdoor` (and its `keypad-door` alias) invert the wrong-code assertion and fail
+exactly there. `ctl messages` stays at **8**; pre-existing phase-14/17 placement flakes stopped
+intermediate legs and the identical legs were retried unchanged (flake logs kept).
+
+The package before this slice was the flat SDK package (mod API 0.2) at version **0.2.12** (the passcode
 smoker slice), validated on Linux with rustc 1.95.0 on 2026-11-24 against Horizon
 `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. All Rust steps ran through **forwarded**

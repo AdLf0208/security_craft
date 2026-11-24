@@ -5,6 +5,8 @@
   "block.securitycraft.keypad_furnace": "Passcode-protected Furnace",
   "block.securitycraft.keypad_smoker": "Passcode-protected Smoker",
   "block.securitycraft.iron_door_reinforced": "Reinforced Door",
+  "block.securitycraft.keypad_trapdoor": "Keypad Trapdoor",
+  "help.securitycraft.keypad_trapdoor.info": "The Keypad Trapdoor acts like a Keypad combined with a Reinforced Iron Trapdoor, where a code has to be inserted in order to open the trapdoor.",
   "itemGroup.securitycraft": "SecurityCraft",
   "item.securitycraft.harming_module": "Harming Module",
   "item.securitycraft.allowlist_module": "Allowlist Module",
