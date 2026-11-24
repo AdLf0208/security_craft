@@ -883,6 +883,50 @@ pub fn furnace_tick(state: &mut FurnaceState, input: FurnaceTick) -> FurnaceStep
     step
 }
 
+// --- the universal block modifier: reinforced <-> vanilla --------------------
+
+/// The counterpart of a block under the universal block remover/reinforcer.
+///
+/// Upstream's `IReinforcedBlock` keeps two `Map<Block, Block>` tables,
+/// `VANILLA_TO_SECURITYCRAFT` and `SECURITYCRAFT_TO_VANILLA`. The reinforcer walks
+/// the first (`to_reinforced = true`), the remover walks the second. The carried
+/// family is the three simple cube blocks whose 26.3 templates exist; a block
+/// outside the table has no conversion (upstream's `get(...)` returns `null`, so
+/// `convertBlock` returns `false` and the click passes through).
+#[must_use]
+pub fn converted_block(id: &str, to_reinforced: bool) -> Option<&'static str> {
+    // Upstream's two maps are inverses over the same `(reinforced, vanilla)` pairs.
+    const PAIRS: [(&str, &str); 3] = [
+        ("securitycraft:reinforced_stone", "minecraft:stone"),
+        (
+            "securitycraft:reinforced_iron_block",
+            "minecraft:iron_block",
+        ),
+        (
+            "securitycraft:reinforced_oak_planks",
+            "minecraft:oak_planks",
+        ),
+    ];
+    PAIRS.iter().find_map(|&(reinforced, vanilla)| {
+        if to_reinforced {
+            (id == vanilla).then_some(reinforced)
+        } else {
+            (id == reinforced).then_some(vanilla)
+        }
+    })
+}
+
+/// Whether `player` may run a conversion that touches an owned block.
+///
+/// Upstream's `UniversalBlockReinforcerItem.convertBlock` refuses when the block
+/// entity is `IOwnable` and is owned by neither the acting player nor the
+/// dispenser's owner. Unowned blocks (the simple reinforced cube family here)
+/// convert for anyone.
+#[must_use]
+pub fn may_convert(owner: Option<u128>, player: u128) -> bool {
+    owner.is_none_or(|owner| owner == player)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1580,5 +1624,64 @@ mod tests {
             "the input smelts once the matched recipe's cooking time has passed"
         );
         assert!(state.burn < 1600, "fuel is consumed as the furnace burns");
+    }
+
+    #[test]
+    fn a_reinforced_block_converts_to_its_vanilla_counterpart() {
+        // Upstream's SECURITYCRAFT_TO_VANILLA map: the remover turns each carried
+        // reinforced block back into the vanilla block it copies.
+        assert_eq!(
+            converted_block("securitycraft:reinforced_stone", false),
+            Some("minecraft:stone")
+        );
+        assert_eq!(
+            converted_block("securitycraft:reinforced_iron_block", false),
+            Some("minecraft:iron_block")
+        );
+        assert_eq!(
+            converted_block("securitycraft:reinforced_oak_planks", false),
+            Some("minecraft:oak_planks")
+        );
+    }
+
+    #[test]
+    fn a_vanilla_block_converts_to_its_reinforced_counterpart() {
+        // The reverse direction of the same map, used by the reinforcer.
+        assert_eq!(
+            converted_block("minecraft:stone", true),
+            Some("securitycraft:reinforced_stone")
+        );
+        assert_eq!(
+            converted_block("minecraft:iron_block", true),
+            Some("securitycraft:reinforced_iron_block")
+        );
+        assert_eq!(
+            converted_block("minecraft:oak_planks", true),
+            Some("securitycraft:reinforced_oak_planks")
+        );
+    }
+
+    #[test]
+    fn a_block_outside_the_table_has_no_conversion() {
+        // Upstream's `get` returns null for a block with no reinforced counterpart,
+        // so the tool's click passes through and the block is untouched.
+        assert_eq!(converted_block("minecraft:dirt", false), None);
+        assert_eq!(converted_block("securitycraft:keypad", false), None);
+        assert_eq!(converted_block("minecraft:dirt", true), None);
+    }
+
+    #[test]
+    fn only_the_owner_may_convert_a_guarded_block() {
+        // Upstream's IOwnable check in convertBlock: the acting player or the
+        // dispenser's owner must own a block that carries an owner.
+        assert!(may_convert(Some(OWNER), OWNER), "the owner converts");
+        assert!(
+            !may_convert(Some(OWNER), STRANGER),
+            "a stranger cannot convert an owned block"
+        );
+        assert!(
+            may_convert(None, STRANGER),
+            "an unowned reinforced cube converts for anyone"
+        );
     }
 }

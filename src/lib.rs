@@ -22,7 +22,7 @@ use mod_api::{
     IsSignalSourceEvent, ItemPart, LevelHost, LevelSide, LevelTickPostEvent, MenuButtonEvent,
     MenuClosedEvent, OnBlockPlacedByEvent, PlayerContainerCloseEvent, RegisterCommandsEvent,
     Registrar, RegistrationContext, RunModCommandEvent, Screen, ScreenClickEvent, ScreenDrawEvent,
-    ServerHost, StateForPlacementEvent, UseItemOnEvent, UseWithoutItemEvent,
+    ServerHost, StateForPlacementEvent, UseItemOnEvent, UseOnEvent, UseWithoutItemEvent,
 };
 
 /// The keypad: its block entity (screen, menu, signal) and its block (placement, redstone).
@@ -473,6 +473,37 @@ impl BlockEntityPart for DoorEntity {
     }
 }
 
+/// The universal block remover: a right-click on a carried reinforced block
+/// returns it to its vanilla counterpart, retaining the block's owner/code state.
+struct Remover;
+
+#[mod_api::horizon_part]
+impl ItemPart for Remover {
+    fn use_on(&self, host: HostSide, event: &mut UseOnEvent<'_>) -> Option<InteractionResult> {
+        support::on_conversion_use(host, event, false)
+    }
+}
+
+/// The universal block reinforcer: the reverse conversion, vanilla → reinforced.
+struct Reinforcer;
+
+#[mod_api::horizon_part]
+impl ItemPart for Reinforcer {
+    fn use_on(&self, host: HostSide, event: &mut UseOnEvent<'_>) -> Option<InteractionResult> {
+        support::on_conversion_use(host, event, true)
+    }
+}
+
+/// A reinforced block's item records its placer as owner, as the keypad's does.
+struct ReinforcedItem;
+
+#[mod_api::horizon_part]
+impl ItemPart for ReinforcedItem {
+    fn on_block_placed_by(&self, host: &mut dyn ServerHost, event: &mut OnBlockPlacedByEvent<'_>) {
+        support::on_reinforced_placed(host, event);
+    }
+}
+
 #[derive(Default)]
 struct Mod;
 
@@ -596,6 +627,20 @@ impl Hooks for Mod {
             smart_module,
             disguise_module,
         );
+        // The universal block modifier: one item part per tool (the conversion
+        // runs on the held item's use), and one per reinforced block item so the
+        // placer becomes the owner the conversion checks and carries over.
+        // Bind each key first: `r.item_part(r.item_key(…), …)` borrows `r` twice.
+        let remover = r.item_key(support::REMOVER);
+        r.item_part(remover, Remover);
+        let reinforcer = r.item_key(support::REINFORCER);
+        r.item_part(reinforcer, Reinforcer);
+        let stone = r.item_key(support::REINFORCED_STONE);
+        r.item_part(stone, ReinforcedItem);
+        let iron = r.item_key(support::REINFORCED_IRON_BLOCK);
+        r.item_part(iron, ReinforcedItem);
+        let planks = r.item_key(support::REINFORCED_OAK_PLANKS);
+        r.item_part(planks, ReinforcedItem);
     }
 
     /// `/securitycraft info|code|owner`: the harness controls this slice's e2e needs (a headless
@@ -634,6 +679,15 @@ impl Hooks for Mod {
         event
             .commands
             .push(mod_api::Command::new("securitycraft cinfo <pos:block_pos>"));
+        // Harness controls for the universal block modifier: a headless harness
+        // cannot type into upstream's passcode panel or drive a second player.
+        event.commands.push(mod_api::Command::op(
+            "securitycraft rset <pos:block_pos> <code:word>",
+            2,
+        ));
+        event
+            .commands
+            .push(mod_api::Command::new("securitycraft rinfo <pos:block_pos>"));
     }
 
     /// A menu a mod opened closed, or its player left: every digit that player typed is gone.

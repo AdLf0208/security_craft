@@ -12,6 +12,11 @@
     "securitycraft:harming_module",
     "securitycraft:allowlist_module",
     "securitycraft:denylist_module",
-    "securitycraft:smart_module"
+    "securitycraft:smart_module",
+    "securitycraft:universal_block_remover",
+    "securitycraft:universal_block_reinforcer_lvl1",
+    "securitycraft:reinforced_stone",
+    "securitycraft:reinforced_iron_block",
+    "securitycraft:reinforced_oak_planks"
   ]
 }

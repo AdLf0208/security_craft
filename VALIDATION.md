@@ -1,5 +1,40 @@
 # Validation
 
+## Slice 15 — the universal block modifier and the reinforced family (0.2.15)
+
+| Check | Result |
+|---|---|
+| Inventory gate (1,905 jar models, tools + 3 cube pairs, 26.3 templates) | no `builtin/entity` in the carried tools/cubes; `stone`/`iron_block`/`oak_planks` models present; no renderer (`universal-inventory.log`) |
+| Red (`converted_block`/`may_convert` stubbed) | **68 passed / 3 failed** — both conversion tables and the owner gate (`universal-red.log`) |
+| `cargo test --offline` | **71 passed**, 0 failed (`sdk-test.log` regenerated on the final 0.2.15 tree, `universal-lint-test.log`) |
+| `cargo fmt --check` + `cargo clippy --all-targets --offline -- -D warnings` | Pass, 0 warnings (`universal-lint.log`) |
+| Two `cargo horizon-mod build`s + `cmp` | byte-identical, `rm -f Cargo.lock` before each (`universal-build.log`) |
+| `cargo horizon-mod check securitycraft.hmod` | `0.2.15 (native-mod, … for 26.3)`, EXIT 0 (`universal-check-fits.log`) |
+| `fits --build 0a875da` / `--build 0b14f8a` | `made for` / `fits`, EXIT 0, delivered SHA (`universal-check-fits.log`) |
+| `verify-sdk-package.py securitycraft` | 1/1, `package matches the tree`, **71 tests**, SDK-only deps (R9), no lock (`universal-verify-sdk-package.log`) |
+| Launcher build | `Compiling securitycraft (1 of 1)`, `native-0a875da-12c79161ab08 built` (`universal-launcher-build.log`) |
+| In-game scenario (`tools/e2e.sh`, launcher-built game) | **PASS + `EXIT:0`**, all 24 phases incl. phase 24 (`securitycraft-e2e/e2e-universal.log`) |
+| Control (unmodified Nightly) | `EXIT:1` at phase 1 (`e2e-control.log`) |
+| Ids-unknown control (`CONTROL=1`) | PASS + `EXIT:0`, ids unknown (`e2e-ids-unknown.log`) |
+| SELFTEST (universal) | `EXIT:1` at phase 24, "expected the reinforced cube NOT to convert (minecraft:iron_block)" (`e2e-selftest-universal.log`) |
+| `check-e2e-logs.py securitycraft-e2e --strict` | `logs=42 ok=42`, exit 0 (`slice14-check-e2e-logs.log`) |
+| `check-recipe-types.py securitycraft` | `securitycraft: ok`, exit 0 (`slice14-check-recipe-types.log`) |
+
+The delivered package is `securitycraft.hmod` **127,108 B**, SHA-256
+`6a85007bead03709ab190021a5cca7f9db0b239d288f70f10131d31eb30c35bb`, **161 entries**, version
+**0.2.15**, SDK-only dependency set (R9) and no packed `Cargo.lock`. The launcher build printed
+`Compiling securitycraft (1 of 1)` after the manifest bump; `sdk-test.log` was regenerated on the
+final 0.2.15 tree (71 tests) before the last `verify-sdk-package.py` run, which reports
+`package matches the tree`.
+
+Phase 24 proves the carried remover/reinforcer: a placed `reinforced_iron_block` (owner + code set
+through the harness) converts to `minecraft:iron_block` under the remover, the owner/code survive,
+the reinforcer converts it back with the same state, and a plain vanilla `stone` under the same tool
+stays `minecraft:stone`. Every assertion is a parsed `ctl block` / `ctl messages 8` value;
+`SELFTEST=universal` inverts the conversion assertion and fails exactly there. Pre-existing phase-17
+placement flakes and the phase-24 reach check stopped several legs before their own assertions; the
+identical legs were retried until green and the flake logs are kept (none called green).
+
 ## Slice 14 — the full keypad door (0.2.14)
 
 | Check | Result |

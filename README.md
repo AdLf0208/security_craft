@@ -5,7 +5,7 @@ against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`.
 
 - **`horizon-mod.toml`** — the only manifest and the only identity
-  (`id = "securitycraft"`, `version = "0.2.14"`, `side = "both"`, `[native]` pins).
+  (`id = "securitycraft"`, `version = "0.2.15"`, `side = "both"`, `[native]` pins).
 - **`src/runtime.rs`** — the pure rules (code shape, salted digest, verdict, entry,
   mode, signal countdown, who may set a code or install a module, the allowlist's and
   denylist's listed players, the wrong-code damage, the smart-module retry gate and the
@@ -49,7 +49,11 @@ against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
   owner's right code and closes on the scheduled tick), and the passcode door
   (`securitycraft:keypad_door`, the jar's 32-state blockstate and eight static models on a
   `minecraft:iron_door` template; the owner's right code flips `open` on both halves and the
-  scheduled tick closes them both).
+  scheduled tick closes them both), and the universal block modifier — the remover and level-1
+  reinforcer tools (`securitycraft:universal_block_remover`,
+  `securitycraft:universal_block_reinforcer_lvl1`) that convert a carried reinforced cube
+  (`reinforced_stone`, `reinforced_iron_block`, `reinforced_oak_planks`) to and from its vanilla
+  counterpart, carrying the block's owner/code state across the swap.
 - **`securitycraft.hmod`** — the delivered package (built by
   `cargo horizon-mod build`, copied out of `target/`). Its only dependency is the SDK's
   `horizon-mod-api`, so it **packs no `Cargo.lock`**: R10 accepts a lock only as the

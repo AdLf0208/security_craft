@@ -25,10 +25,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use mod_api::{
     BlockChangedEvent, BlockEntitySubmitEvent, BlockEntityTickEvent, BlockEntityUpdateTagEvent,
-    ClientHost, Compound, DrawContext, Host, HostTransaction, Identifier, InteractionResult,
-    ItemKey, ItemPlace, ItemResource, ItemStack, LevelHost, LevelRef, LevelTickPostEvent,
-    MenuButtonEvent, ModContainer, OnBlockPlacedByEvent, RandomSource, RecipeInput, RecipeMatch,
-    Screen, ScreenClickEvent, ScreenDrawEvent, ServerHost, StateForPlacementEvent, Tag, Text,
+    BlockUpdateFlags, ClientHost, Compound, DrawContext, Host, HostSide, HostTransaction,
+    Identifier, InteractionResult, ItemKey, ItemPlace, ItemResource, ItemStack, LevelHost,
+    LevelRef, LevelTickPostEvent, MenuButtonEvent, ModContainer, OnBlockPlacedByEvent,
+    RandomSource, RecipeInput, RecipeMatch, Screen, ScreenClickEvent, ScreenDrawEvent, ServerHost,
+    StateForPlacementEvent, Tag, Text, UseOnEvent,
 };
 
 use crate::runtime::{
@@ -36,8 +37,8 @@ use crate::runtime::{
     FURNACE_OUTPUT, FURNACE_SLOTS, FurnaceState, FurnaceTick, ListData, Mode, Throttle,
     TrapdoorChange, after_submit, button, container_access, cooldown_allows, cooldown_failed,
     disguise_tint, door_access, door_halves, door_tick, facing_from_yaw, furnace_access,
-    furnace_tick, hash_code, is_allowed, is_denied, may_install, may_set_code, new_salt,
-    tick_signal, trapdoor_access, trapdoor_tick, valid_code, wrong_code_damage,
+    furnace_tick, hash_code, is_allowed, is_denied, may_convert, may_install, may_set_code,
+    new_salt, tick_signal, trapdoor_access, trapdoor_tick, valid_code, wrong_code_damage,
 };
 
 /// The keypad block; its item (`securitycraft:keypad_item`) places it.
@@ -2198,6 +2199,154 @@ fn set_deny(
     ))
 }
 
+// --- the universal block modifier: reinforced <-> vanilla -------------------
+
+/// The universal block remover: right-clicking a reinforced cube returns it to
+/// its vanilla counterpart, retaining the block's owner/code state.
+pub(crate) const REMOVER: &str = "securitycraft:universal_block_remover";
+/// The universal block reinforcer: the reverse conversion. Its own recipe needs
+/// the not-yet-ported `securitycraft:laser_block`, so only the item is carried.
+pub(crate) const REINFORCER: &str = "securitycraft:universal_block_reinforcer_lvl1";
+pub(crate) const REINFORCED_STONE: &str = "securitycraft:reinforced_stone";
+pub(crate) const REINFORCED_IRON_BLOCK: &str = "securitycraft:reinforced_iron_block";
+pub(crate) const REINFORCED_OAK_PLANKS: &str = "securitycraft:reinforced_oak_planks";
+
+/// A fixed salt for the harness-only code readout: the state lives in process
+/// memory, never in a saved compound, so no plaintext code reaches disk.
+const REINFORCED_HARNESS_SALT: &str = "00112233445566778899aabbccddeeff";
+
+/// Position of a converted block, including the level: a keypad in another
+/// dimension is a different block (the same session rule the keypad uses).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ReinforcedKey {
+    dimension: String,
+    pos: [i32; 3],
+}
+
+/// The state a universal modifier carries across a conversion: the block's owner
+/// (the placer) and a salted digest of its code. Upstream saves this in the block
+/// entity's compound (`convertStateWhileRetainingData`); the simple reinforced
+/// cubes have no block entity, so the port keeps it by position and restores it
+/// after the swap (recorded as a deviation in `notes.md`).
+#[derive(Clone, Debug, Default)]
+struct ReinforcedState {
+    owner: Option<u128>,
+    code: Option<String>,
+}
+
+fn reinforced() -> MutexGuard<'static, BTreeMap<ReinforcedKey, ReinforcedState>> {
+    static STATE: OnceLock<Mutex<BTreeMap<ReinforcedKey, ReinforcedState>>> = OnceLock::new();
+    STATE
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .expect("reinforced state lock poisoned")
+}
+
+fn reinforced_key(host: &dyn Host, level: LevelRef, pos: [i32; 3]) -> Option<ReinforcedKey> {
+    Some(ReinforcedKey {
+        dimension: level.dimension().id(host)?,
+        pos,
+    })
+}
+
+/// A reinforced block's item records its placer as owner, as upstream's
+/// `IOwnable` does on placement. This is the same write the keypad's item makes.
+pub(crate) fn on_reinforced_placed(
+    host: &mut dyn ServerHost,
+    event: &mut OnBlockPlacedByEvent<'_>,
+) {
+    let Some(level) = in_place_level(host) else {
+        return;
+    };
+    let Some(key) = reinforced_key(&*host, level, event.pos) else {
+        return;
+    };
+    if let Some(owner) = event.placer.map(|placer| placer.uuid()) {
+        reinforced().entry(key).or_default().owner = Some(owner);
+    }
+}
+
+/// `ItemPart::use_on` for the two universal tools: a reinforced cube converts to
+/// its vanilla counterpart under the remover, and back under the reinforcer. A
+/// block with no counterpart (a plain vanilla block under the remover) answers
+/// `None`, so the click passes through and the block is untouched — the
+/// differential the in-game leg asserts.
+pub(crate) fn on_conversion_use(
+    host: HostSide,
+    event: &mut UseOnEvent<'_>,
+    to_reinforced: bool,
+) -> Option<InteractionResult> {
+    let HostSide::Server(host) = host else {
+        return None;
+    };
+    let level = in_place_level(host)?;
+    let from = block_at(&*host, level, event.pos);
+    let target = crate::runtime::converted_block(&from, to_reinforced)?;
+    let key = reinforced_key(&*host, level, event.pos)?;
+    // Upstream refuses when an existing block is owned by neither the acting
+    // player nor the dispenser's owner. The simple cubes are unowned here.
+    let saved = {
+        let state = reinforced();
+        let entry = state.get(&key);
+        if !may_convert(entry.and_then(|e| e.owner), event.player) {
+            return Some(InteractionResult::Fail);
+        }
+        entry.cloned().unwrap_or_default()
+    };
+    let state_id = host.block_state_id(target)?;
+    let flags = BlockUpdateFlags::NEIGHBORS | BlockUpdateFlags::CLIENTS;
+    if !level
+        .set_block(host, event.pos, state_id, flags)
+        .unwrap_or(false)
+    {
+        return Some(InteractionResult::Fail);
+    }
+    // Save → swap → load back: the state rides the position through the
+    // conversion, exactly as the retained compound does upstream.
+    reinforced().insert(key, saved);
+    Some(InteractionResult::SuccessServer)
+}
+
+/// Harness control: set the code of a carried reinforced block. A headless
+/// harness cannot type into upstream's passcode panel; the readout is a harness
+/// addition, not gameplay (precedent: `/securitycraft cset`).
+fn set_reinforced_code(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    code: &str,
+    asking: Option<u128>,
+) -> String {
+    if !valid_code(code) {
+        return "The code must be 4 to 20 ASCII digits.".to_owned();
+    }
+    let Some(digest) = hash_code(code, REINFORCED_HARNESS_SALT) else {
+        return "The code must be 4 to 20 ASCII digits.".to_owned();
+    };
+    let Some(key) = reinforced_key(&*host, level, pos) else {
+        return "No level at that position.".to_owned();
+    };
+    let mut state = reinforced();
+    let entry = state.entry(key).or_default();
+    if entry.owner.is_none() {
+        entry.owner = asking;
+    }
+    entry.code = Some(digest);
+    "Code stored.".to_owned()
+}
+
+/// Harness readout of the state riding a reinforced block across a conversion.
+fn reinforced_info(host: &dyn Host, level: LevelRef, pos: [i32; 3]) -> Option<String> {
+    let block = block_at(host, level, pos);
+    let key = reinforced_key(host, level, pos)?;
+    let state = reinforced().get(&key).cloned().unwrap_or_default();
+    Some(format!(
+        "securitycraft reinforced {block} owner={} code={}",
+        if state.owner.is_some() { "set" } else { "none" },
+        if state.code.is_some() { "set" } else { "none" }
+    ))
+}
+
 /// Answers a `/securitycraft` invocation, or `None` when it is not one.
 pub(crate) fn command(
     host: &mut dyn ServerHost,
@@ -2293,6 +2442,36 @@ pub(crate) fn command(
                 .into_iter()
                 .find(|level| level.dimension() == invocation.dimension)?;
             Some(set_deny(host, level, pos, who, asking).unwrap_or_else(|line| line))
+        }
+        ["securitycraft", "rset"] => {
+            let Some(mod_api::CommandArgumentValue::BlockPos(pos)) = invocation.argument("pos")
+            else {
+                return Some("Usage: /securitycraft rset <x> <y> <z> <digits>".to_owned());
+            };
+            let pos = *pos;
+            let Some(mod_api::CommandArgumentValue::String(code)) = invocation.argument("code")
+            else {
+                return Some("Usage: /securitycraft rset <x> <y> <z> <digits>".to_owned());
+            };
+            let level = host
+                .levels()
+                .list_levels()
+                .into_iter()
+                .find(|level| level.dimension() == invocation.dimension)?;
+            Some(set_reinforced_code(host, level, pos, code, asking))
+        }
+        ["securitycraft", "rinfo"] => {
+            let Some(mod_api::CommandArgumentValue::BlockPos(pos)) = invocation.argument("pos")
+            else {
+                return Some("Usage: /securitycraft rinfo <x> <y> <z>".to_owned());
+            };
+            let pos = *pos;
+            let level = host
+                .levels()
+                .list_levels()
+                .into_iter()
+                .find(|level| level.dimension() == invocation.dimension)?;
+            reinforced_info(host, level, pos)
         }
         ["securitycraft", "cset"] | ["securitycraft", "copen"] | ["securitycraft", "cinfo"] => {
             let Some(mod_api::CommandArgumentValue::BlockPos(pos)) = invocation.argument("pos")

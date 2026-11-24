@@ -1,6 +1,6 @@
 id = "securitycraft"
 name = "SecurityCraft"
-version = "0.2.14"
+version = "0.2.15"
 description = """SecurityCraft's keypad and reinforced door: a keypad stores a salted digest of a typed code,
 asks for it on a drawn panel of keys and, on a match, powers itself for three seconds; a reinforced
 door beside it opens on that redstone signal and closes when it runs out. The keypad's placer is its

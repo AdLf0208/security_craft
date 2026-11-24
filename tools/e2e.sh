@@ -88,6 +88,7 @@
 #   SELFTEST=keypad-trapdoor tools/e2e.sh  # phase 22 expects a wrong code to OPEN the trapdoor: exit 1
 #   (SELFTEST=keypad-door is the same inverted assertion, named for the whole door family)
 #   SELFTEST=keypad-door-full tools/e2e.sh # phase 23 expects a wrong code to OPEN the full door: exit 1
+#   SELFTEST=universal tools/e2e.sh # phase 24 expects the reinforced cube NOT to convert: exit 1
 #   CONTROL=1 tools/e2e.sh     # no package at all: the ids must be unknown
 #   GAME=<an unmodified game> tools/e2e.sh   # the differential: the first phase fails
 #
@@ -1804,6 +1805,91 @@ echo "door halves after its signal: lower=$closed_lower upper=$closed_upper"
 [ "$closed_lower" = false ] && [ "$closed_upper" = false ] \
     || fail "the door did not close when its signal ran out ($closed_lower/$closed_upper)"
 ctl close >/dev/null 2>&1 || true
+
+# 24. UNIVERSAL BLOCK MODIFIER: the carried remover converts a placed reinforced
+# cube to its vanilla counterpart, the reinforcer converts it back, and the owner/code
+# state rides both swaps. A plain vanilla block under the same tool is unchanged — the
+# differential. SELFTEST=universal inverts the conversion assertion and ends EXIT:1.
+rinfo() { ctl chat "/securitycraft rinfo $1 $2 $3" >/dev/null; ctl wait 4; ctl messages 8 | jq -r '.chat[]' | grep -m1 '^securitycraft reinforced ' || true; }
+say "phase 24: the universal block modifier converts a reinforced cube to/from vanilla, carrying owner/code"
+CURX=$(ctl state | jq -r '.player.position[0] | floor')
+CURZ=$(ctl state | jq -r '.player.position[2] | floor')
+UNI_X=$((CURX+6)); UNI_Y=101; UNI_Z=$((CURZ+6))
+VAN_X=$((CURX+6)); VAN_Z=$((CURZ+5))
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl wait 2
+ctl give securitycraft:universal_block_remover 1 >/dev/null || fail "the game refused the universal block remover: the package is not loaded"
+ctl give securitycraft:universal_block_reinforcer_lvl1 1 >/dev/null || fail "the game refused the universal block reinforcer: the package is not loaded"
+ctl give securitycraft:reinforced_iron_block 1 >/dev/null || fail "the game refused securitycraft:reinforced_iron_block: the package is not loaded"
+ctl wait 6
+ctl close >/dev/null 2>&1 || true
+ctl command "setblock $UNI_X $UNI_Y $UNI_Z minecraft:air" >/dev/null
+ctl command "setblock $VAN_X $UNI_Y $VAN_Z minecraft:air" >/dev/null
+ctl command "setblock $UNI_X $((UNI_Y-1)) $UNI_Z minecraft:stone" >/dev/null
+ctl command "setblock $VAN_X $((UNI_Y-1)) $VAN_Z minecraft:stone" >/dev/null
+ctl tp "$((UNI_X+1)).5" "$UNI_Y" "$((UNI_Z+1)).5" >/dev/null
+ctl wait 6
+ctl look-at block "$UNI_X" "$UNI_Y" "$UNI_Z" south >/dev/null 2>&1 || true
+ctl select securitycraft:reinforced_iron_block >/dev/null
+reply=$(ctl place "$UNI_X" "$UNI_Y" "$UNI_Z" 2>&1 || true)
+echo "reinforced cube place reply: $reply"
+echo "$reply" | jq -e '.changed == true' >/dev/null || fail "the reinforced cube did not place ($reply)"
+ctl wait 4
+echo "cube before: $(block_name "$UNI_X" "$UNI_Y" "$UNI_Z")"
+[ "$(block_name "$UNI_X" "$UNI_Y" "$UNI_Z")" = securitycraft:reinforced_iron_block ] \
+    || fail "no reinforced cube at $UNI_X,$UNI_Y,$UNI_Z"
+line=$(rinfo "$UNI_X" "$UNI_Y" "$UNI_Z"); echo "cube info: $line"
+[ "$(field owner "$line")" = set ] || fail "the cube's placer is not its owner: $line"
+ctl chat "/securitycraft rset $UNI_X $UNI_Y $UNI_Z 2468" >/dev/null; ctl wait 4
+line=$(rinfo "$UNI_X" "$UNI_Y" "$UNI_Z"); echo "coded cube: $line"
+[ "$(field code "$line")" = set ] || fail "the cube did not save its code: $line"
+ctl select securitycraft:universal_block_remover >/dev/null
+ctl look-at block "$UNI_X" "$UNI_Y" "$UNI_Z" south >/dev/null 2>&1 || true
+ctl tp "$((UNI_X+1)).5" "$UNI_Y" "$((UNI_Z+1)).5" >/dev/null
+ctl wait 6
+echo "player before the remover: $(ctl state | jq -c '.player.position')"
+ctl look-at block "$UNI_X" "$UNI_Y" "$UNI_Z" south >/dev/null 2>&1 || true
+reply=$(ctl interact "$UNI_X" "$UNI_Y" "$UNI_Z" south 2>&1 || true)
+echo "remover interact reply: $reply"
+ctl wait 6
+converted=$(block_name "$UNI_X" "$UNI_Y" "$UNI_Z")
+echo "cube after the remover: $converted"
+if [ "$SELFTEST" = universal ]; then
+    [ "$converted" = securitycraft:reinforced_iron_block ] \
+        || fail "SELFTEST: expected the reinforced cube NOT to convert ($converted)"
+fi
+[ "$converted" = minecraft:iron_block ] \
+    || fail "the remover did not convert the cube to vanilla ($converted)"
+line=$(rinfo "$UNI_X" "$UNI_Y" "$UNI_Z"); echo "vanilla counterpart info: $line"
+[ "$(field owner "$line")" = set ] && [ "$(field code "$line")" = set ] \
+    || fail "the owner/code did not survive the conversion: $line"
+ctl select securitycraft:universal_block_reinforcer_lvl1 >/dev/null
+ctl look-at block "$UNI_X" "$UNI_Y" "$UNI_Z" south >/dev/null 2>&1 || true
+ctl tp "$((UNI_X+1)).5" "$UNI_Y" "$((UNI_Z+1)).5" >/dev/null
+ctl wait 6
+ctl look-at block "$UNI_X" "$UNI_Y" "$UNI_Z" south >/dev/null 2>&1 || true
+reply=$(ctl interact "$UNI_X" "$UNI_Y" "$UNI_Z" south 2>&1 || true)
+echo "reinforcer interact reply: $reply"
+ctl wait 6
+restored=$(block_name "$UNI_X" "$UNI_Y" "$UNI_Z")
+echo "cube after the reinforcer: $restored"
+[ "$restored" = securitycraft:reinforced_iron_block ] \
+    || fail "the reinforcer did not restore the reinforced cube ($restored)"
+line=$(rinfo "$UNI_X" "$UNI_Y" "$UNI_Z"); echo "restored cube info: $line"
+[ "$(field owner "$line")" = set ] && [ "$(field code "$line")" = set ] \
+    || fail "the owner/code did not survive the reverse conversion: $line"
+ctl command "setblock $VAN_X $UNI_Y $VAN_Z minecraft:stone" >/dev/null
+ctl wait 4
+ctl select securitycraft:universal_block_remover >/dev/null
+ctl look-at block "$VAN_X" "$UNI_Y" "$VAN_Z" south >/dev/null 2>&1 || true
+ctl interact "$VAN_X" "$UNI_Y" "$VAN_Z" south >/dev/null || true
+ctl wait 4
+van=$(block_name "$VAN_X" "$UNI_Y" "$VAN_Z")
+echo "vanilla stone under the remover: $van"
+[ "$van" = minecraft:stone ] || fail "the remover changed a plain vanilla block ($van)"
+
+echo "PASS-universal: the carried remover converted a placed reinforced iron block to minecraft:iron_block while its owner and code survived, the reinforcer converted it back with the same state, and a plain vanilla stone under the same tool stayed minecraft:stone"
 
 echo "PASS-keypad-door: the passcode door saved its owner and code, a wrong code left both halves open=false, the owner's right code flipped both halves to open=true, and its scheduled tick closed them both; a vanilla iron door beside it opened on redstone with no code"
 

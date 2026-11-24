@@ -3120,3 +3120,200 @@ block and assert the block id changes to its vanilla counterpart while a plain v
 breaks unchanged under the same tool; `SELFTEST=universal` inverts the conversion assertion and
 ends `EXIT:1`. If the conversion cannot be expressed through the pin's block/item hooks without a
 renderer, stop with `blocked(<symbol>)` and evidence instead of inventing a fake tool.
+
+## Slice 15 — the universal block modifier and the reinforced family (2026-11-24, SDK `0a875da`) — 0.2.15
+
+**Slice and gap line.** The verbatim `## Next slice` above: *"the universal block modifier and the
+reinforced-block family … the jar's universal block remover/reinforcer whose right-click converts a
+reinforced block to/from its vanilla counterpart, with the owner/code state carried over"*. Class
+**content**, tier **deep** in the ledger; the delivered shape is the port's existing **logic +
+machines** half (a carried tool item using the SDK's `ItemPart::use_on`, a position-keyed state stash
+and a saved owner) — no new block entity type, renderer or hook kind. The keypad chest stays
+`blocked(register_block_entity_renderers)` (slice 10, not retried); cameras, mines and lasers stay
+behind this slice.
+
+**Inventory gate first (the brief's stop condition).**
+Evidence: [`universal-inventory.log`](../../_shared/evidence/securitycraft/universal-inventory.log).
+Scanned every one of the jar's 1,905 models for `builtin/entity`: only `display_case`,
+`keypad_chest` and `security_camera` carry it — **not** the tool models
+(`universal_block_remover` is `item/generated`, `universal_block_reinforcer_lvl1` is
+`minecraft:item/handheld`) and **not** the carried reinforced models (`reinforced_block` is a static
+cube mesh; `reinforced_stone`/`reinforced_iron_block`/`reinforced_oak_planks` parent to
+`reinforced_cube_all` with vanilla textures). The 26.3 prepared root has
+`assets/minecraft/models/block/{stone,iron_block,oak_planks,cube_all}.json`, so the content templates
+`minecraft:stone` / `minecraft:iron_block` / `minecraft:oak_planks` are present and valid. No
+renderer, no missing template → **no `blocked` symbol**; the slice may proceed.
+
+**Exact conversion rules read from the artefact (behaviour only, clean-room rewrite).** Read from
+the pinned upstream clone `Geforce132/SecurityCraft@c4d35b0c`: `api/IReinforcedBlock.java`
+(the two inverse `Map<Block,Block>` tables and the `convertTo*`: start from the target's default
+state, copy every property the target also has), `items/UniversalBlockReinforcerItem.java`
+(`convertBlock`: pick the counterpart, check `IOwnable`, then `convertStateWhileRetainingData` —
+save BE NBT, set the new block, load the NBT back onto the new BE; if reinforcing, set the owner),
+`items/UniversalBlockRemoverItem.java` (the separate in-world removal tool; the *unreinforcing*
+conversion is the reinforcer item with the `UNREINFORCING` component), `SCContent.java`
+(`reinforcedCopy(block) = Properties.ofFullCopy(block).explosionResistance(Float.MAX_VALUE)`, so
+hardness and `requiresCorrectToolForDrops` are inherited; the remover recipe is shears + 2 iron).
+The clone is read-only and was not shipped.
+
+**Red proof (TDD, before the rule existed).** `src/runtime.rs` gained `converted_block` and
+`may_convert` as stubs (`None` / `true`) and four tests first. Forwarded
+`cargo test --offline` ([`universal-red.log`](../../_shared/evidence/securitycraft/universal-red.log)):
+
+```
+---- runtime::tests::a_reinforced_block_converts_to_its_vanilla_counterpart stdout ----
+thread 'runtime::tests::a_reinforced_block_converts_to_its_vanilla_counterpart' (1408498) panicked at src/runtime.rs:1615:9:
+assertion `left == right` failed
+  left: None
+ right: Some("minecraft:stone")
+
+---- runtime::tests::a_vanilla_block_converts_to_its_reinforced_counterpart stdout ----
+thread 'runtime::tests::a_vanilla_block_converts_to_its_reinforced_counterpart' (1408506) panicked at src/runtime.rs:1632:9:
+assertion `left == right` failed
+  left: None
+ right: Some("securitycraft:reinforced_stone")
+
+---- runtime::tests::only_the_owner_may_convert_a_guarded_block stdout ----
+thread 'runtime::tests::only_the_owner_may_convert_a_guarded_block' (1408522) panicked at src/runtime.rs:1660:9:
+a stranger cannot convert an owned block
+
+test result: FAILED. 68 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+`converted_block` then became the inverse pair table (stone / iron_block / oak_planks) and
+`may_convert` `owner.is_none_or(|o| o == player)`; **71 tests pass**.
+
+### What the slice implements
+
+- **Pure rules** (`runtime::converted_block`, `runtime::may_convert`): the two inverse maps over the
+  three carried pairs and the `IOwnable` gate. A block outside the table has no conversion, which is
+  the differential.
+- **Tool items**: `securitycraft:universal_block_remover` (jar's model, texture, shears+2-iron
+  recipe) and `securitycraft:universal_block_reinforcer_lvl1` (jar's model and texture; its own
+  recipe needs the unported `securitycraft:laser_block`, so it is not carried). Both are SDK-only
+  items with a `ItemPart::use_on`: the remover unreinforces, the reinforcer reinforces.
+- **Reinforced family**: `securitycraft:reinforced_stone` → `minecraft:stone`,
+  `reinforced_iron_block` → `minecraft:iron_block`, `reinforced_oak_planks` → `minecraft:oak_planks`.
+  Each is the jar's byte-for-byte blockstate/models/loot table on the vanilla template with the
+  jar's hardness (1.5 / 5.0 / 2.0), 3.6e6 resistance, `requires_tool`, pickaxe tag, lang and
+  creative-tab entries.
+- **State carry-over**: the owner is recorded when a reinforced block's item places it, and a
+  position-keyed stash holds `owner` + a salted code digest across the swap (upstream's save → set →
+  load-back, recorded as a deviation because these simple blocks have no block entity). The
+  `use_on` hook sets the counterpart state with `NEIGHBORS | CLIENTS` flags and writes the stash
+  back after the swap.
+- **Readout**: `/securitycraft rinfo <pos>` prints `securitycraft reinforced <id> owner=… code=…`;
+  `/securitycraft rset <pos> <digits>` (op 2) stores a harness code. Both are harness additions,
+  not gameplay (precedent: `/securitycraft cset`/`cinfo`).
+
+### Verification (0.2.15, SDK `0a875da`, 2026-11-24)
+
+Every Rust step ran through **forwarded** `build-slot.sh` leases on `AdLf-PC`
+(`build-slot: forwarding … to the remote runner`, relative `--port ports/securitycraft`,
+`CARGO_INCREMENTAL=0`, **no `BUILD_LOCAL=1`**); the launcher build and the game legs stayed local
+(the e2e is `--offscreen`). Evidence under `../_shared/evidence/securitycraft/` and
+`../_shared/evidence/securitycraft-e2e/`.
+
+| Check | Evidence | Result |
+|---|---|---|
+| Inventory gate | `universal-inventory.log` | 0 `builtin/entity` in tools or carried cubes; 3 vanilla templates found; no renderer |
+| Red | `universal-red.log` | **68 passed / 3 failed**, both conversion tables and the owner gate |
+| Tests | `sdk-test.log` (regenerated on the final 0.2.15 tree), `universal-lint-test.log` | **71 passed**, 0 failed |
+| Format + lints | `universal-lint.log` | `cargo fmt --check` clean, clippy exit 0, **0 warnings** |
+| Two builds + `cmp` | `universal-build.log` | **byte-identical**; `rm -f Cargo.lock` before each |
+| Delivered | `securitycraft.hmod` | **127,108 B**, SHA-256 `6a85007bead03709ab190021a5cca7f9db0b239d288f70f10131d31eb30c35bb`, **161 entries**, no `Cargo.lock`, version 0.2.15 |
+| Registry check | `universal-check-fits.log` | `securitycraft 0.2.15 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, same SHA, EXIT 0 |
+| `fits --build 0a875da` | `universal-check-fits.log` | `0a875da  made for`, EXIT 0 |
+| `fits --build 0b14f8a` | `universal-check-fits.log` | `0b14f8a  fits`, EXIT 0, same SHA |
+| Gate | `universal-verify-sdk-package.log` | **1/1**, `package matches the tree`, SDK-only deps (R9), no lock, **71 tests** |
+| Launcher build | `universal-launcher-build.log` | `Compiling securitycraft (1 of 1)`, `native-0a875da-12c79161ab08 built` |
+| In-game PASS | `securitycraft-e2e/e2e-universal.log` | **PASS + `EXIT:0`**, all 24 phases incl. phase 24 |
+| Control (unmodified Nightly) | `e2e-control.log` | **`EXIT:1`** at phase 1, ids unknown |
+| Ids-unknown control | `e2e-ids-unknown.log` | PASS + `EXIT:0` |
+| SELFTEST (universal) | `e2e-selftest-universal.log` | **`EXIT:1`**, "expected the reinforced cube NOT to convert (minecraft:iron_block)" |
+| Log checker | `slice14-check-e2e-logs.log` | `logs=42 ok=42`, exit 0 |
+
+Phase 24 in the PASS leg (`e2e-universal.log`):
+
+```
+cube before: securitycraft:reinforced_iron_block
+coded cube: securitycraft reinforced securitycraft:reinforced_iron_block owner=set code=set
+remover interact reply: {"block":{"block":"minecraft:iron_block",...},"block_before":"securitycraft:reinforced_iron_block","changed":true,...,"ok":true,...}
+cube after the remover: minecraft:iron_block
+vanilla counterpart info: securitycraft reinforced minecraft:iron_block owner=set code=set
+reinforcer interact reply: {"block":{"block":"securitycraft:reinforced_iron_block",...},"block_before":"minecraft:iron_block","changed":true,...,"ok":true,...}
+restored cube info: securitycraft reinforced securitycraft:reinforced_iron_block owner=set code=set
+vanilla stone under the remover: minecraft:stone
+PASS-universal: the carried remover converted a placed reinforced iron block to minecraft:iron_block while its owner and code survived, the reinforcer converted it back with the same state, and a plain vanilla stone under the same tool stayed minecraft:stone
+EXIT:0
+```
+
+Every assertion is a parsed `ctl block` / `ctl messages 8` value; `SELFTEST=universal` inverts the
+conversion assertion and fails exactly there. `ctl messages` stays at **8**. Pre-existing placement
+flakes at phase 17 and at the new phase's reach check stopped several legs before their own
+assertions; each identical leg was retried until green and the flake logs are kept
+(`e2e-universal-flake-17{,-2}.log`, `e2e-universal-flake-24{,-2}.log`) — none is called green. The
+phase-24 reach check now teleports immediately before each right-click.
+
+### Coverage added by this slice
+
+| Family | Status |
+|---|---|
+| `universal_block_remover` / `universal_block_reinforcer_lvl1` items (give, select, right-click) | **tested** — phase 24: both tools used in game |
+| `reinforced_iron_block` block/item → `minecraft:iron_block` conversion | **tested** — phase 24: parsed block id before/after; inverted by `SELFTEST=universal` |
+| vanilla → reinforced reverse conversion | **tested** — phase 24: parsed block id after the reinforcer |
+| owner + code survive both swaps | **tested** — phase 24: `rinfo` before, after and after the round trip |
+| a plain vanilla block under the remover | **tested** — phase 24: `minecraft:stone` unchanged (differential) |
+| the remover recipe (shears + 2 iron) | **carried, not crafted in game** — the gating proof is the conversion; recipe type checked by `check-recipe-types.py` |
+| reinforced stone / oak planks conversions | **unit test** `a_reinforced_block_converts_to_its_vanilla_counterpart` (the iron pair is the in-game witness) |
+| reinforcing via `BlockReinforcerMenu` (consume a reinforced block from inventory) | **not ported** — the port's reinforcer converts directly; the jar's menu and the lvl1 recipe's `laser_block` parent are gaps |
+| keypad chest | **`blocked(register_block_entity_renderers)`** — slice 10, unchanged |
+| cameras / mines / lasers, the wider reinforced family | **not ported** — remaining gap list |
+
+### Deviations recorded by this slice
+
+1. **State rides a position-keyed stash, not a block entity.** The three carried reinforced cubes
+   are plain vanilla-template blocks with no block entity, so upstream's
+   `convertStateWhileRetainingData` (save NBT → set → load back) has no BE to write to; the port
+   keeps `owner` + a salted code digest in a process-local table keyed by dimension + position and
+   writes it back after the swap. The owner/code round trip is proven in game; the stash is not
+   saved to disk and is not shared across a relaunch.
+2. **The reinforcer converts directly, without `BlockReinforcerMenu`.** Upstream opens a menu that
+   consumes a reinforced block from inventory; the port's `ItemPart::use_on` converts on the click.
+   Its lvl1 recipe names `securitycraft:laser_block` (unported), so only the item is carried.
+3. **Sounds are `minecraft:iron_block` for all three.** Upstream inherits the vanilla block's sound
+   group via `ofFullCopy`; the content schema's stable value in this port is the iron-block group.
+4. **The remover's durability is not modelled.** Upstream's `hurtAndBreak(1)` is omitted; the tool
+   does not wear out (a harness/tooling scope choice, not a behaviour the slice asserts).
+5. **Property copying is exact for the carried pairs.** All three have no blockstate properties, so
+   `converted_block`/the vanilla default state preserve everything; the generic property loop in
+   upstream's `IReinforcedBlock` is not needed for this family (recorded for a future wider family).
+
+### Changelog for the resubmission (0.2.15)
+
+> Supersedes #1805→0.2.14 (the staged PR). Carries the jar's universal block remover and level-1
+> reinforcer tools and a representative reinforced family — `reinforced_stone`, `reinforced_iron_block`
+> and `reinforced_oak_planks`, each converting to/from its vanilla counterpart with the owner/code
+> state carried across the swap. New pure `converted_block`/`may_convert` rules and their inverted
+> in-game leg prove it; a plain vanilla block under the same tool is unchanged. The keypad, the five
+> modules, the passcode containers, the trapdoor and the keypad door, the salted SHA-256, the SDK-only
+> dependency set and the save format are unchanged.
+
+Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices,rust-port,rust-review
+
+## Next slice
+
+**Family:** the reinforcer's **inventory/menu path and the wider reinforced family** — the next line
+of the gap list after this slice (*"the whole reinforced-block family"* minus the three cube pairs
+proved here). It fits tier **deep** in the same logic+machines shape: a carried `BlockReinforcerMenu`
+screen whose input slot consumes a reinforced block and whose result slot is the converted block,
+extended to a property-bearing pair (e.g. `reinforced_oak_stairs` → `minecraft:oak_stairs`, where the
+`facing`/`half`/`shape` properties must be copied by `IReinforcedBlock.convertTo*`). Before dispatch,
+inventory the chosen pair's models for `builtin/entity` and confirm the 26.3 template and property
+names; the keypad chest stays `blocked(register_block_entity_renderers)` until a renderer surface is
+stamped, and cameras, mines and lasers stay behind it.
+
+**In-game assertion that would prove it:** craft/give the lvl1 reinforcer, open its menu with a
+reinforced block in the input slot, convert a vanilla property-bearing block and assert the block id
+**and** that the property values (`facing`, `half`, `shape`) were copied, while the input count fell
+by one; `SELFTEST=reinforcer-menu` inverts the copied-property assertion and ends `EXIT:1`.

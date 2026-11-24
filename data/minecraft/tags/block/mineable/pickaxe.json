@@ -7,6 +7,9 @@
     "securitycraft:keypad_smoker",
     "securitycraft:iron_door_reinforced",
     "securitycraft:keypad_trapdoor",
-    "securitycraft:keypad_door"
+    "securitycraft:keypad_door",
+    "securitycraft:reinforced_stone",
+    "securitycraft:reinforced_iron_block",
+    "securitycraft:reinforced_oak_planks"
   ]
 }
