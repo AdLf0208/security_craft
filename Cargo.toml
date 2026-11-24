@@ -8,10 +8,10 @@
 #
 # Cargo's name and version are not the mod's identity: horizon-mod.toml is.
 name = "securitycraft"
-version = "0.2.9"
+version = "0.2.10"
 edition = "2024"
 license = "MIT"
-description = "SecurityCraft for Horizon: the keypad, the reinforced door, and the harming, allowlist, denylist, smart and disguise modules"
+description = "SecurityCraft for Horizon: the keypad, the reinforced door, the passcode barrel, and the harming, allowlist, denylist, smart and disguise modules"
 publish = false
 
 [dependencies]

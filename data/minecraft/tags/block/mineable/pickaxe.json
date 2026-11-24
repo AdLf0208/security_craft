@@ -2,6 +2,7 @@
   "replace": false,
   "values": [
     "securitycraft:keypad",
+    "securitycraft:keypad_barrel",
     "securitycraft:iron_door_reinforced"
   ]
 }

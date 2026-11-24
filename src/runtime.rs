@@ -467,6 +467,47 @@ pub fn tick_signal(remaining: i32) -> (i32, bool) {
     (next, next == 0)
 }
 
+/// Whether a passcode container opened, and if not, why.
+///
+/// Upstream's `IPasscodeProtected` blocks (`keypad_barrel`, `keypad_chest`,
+/// `keypad_furnace`, `keypad_smoker`) reuse the keypad's code check before the
+/// block's own container menu may open. The owner check is the same
+/// `IOwnable.isOwnedBy` the set and module paths already use; the digest is the
+/// same salted SHA-256, so a saved container's code still opens it after a
+/// restart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContainerAccess {
+    /// The owner typed the right code: open the container's menu.
+    Open,
+    /// The player is not the container's owner.
+    NotOwner,
+    /// The container has no stored code yet.
+    NoCode,
+    /// A code was stored, but the entry did not match it.
+    WrongCode,
+}
+
+/// The pure access rule of a carried passcode container.
+#[must_use]
+pub fn container_access(
+    owner: Option<u128>,
+    player: u128,
+    stored: Option<&str>,
+    salt_hex: &str,
+    entered: &str,
+) -> ContainerAccess {
+    if !may_set_code(owner, player) {
+        return ContainerAccess::NotOwner;
+    }
+    let Some(stored) = stored else {
+        return ContainerAccess::NoCode;
+    };
+    match submit(entered, salt_hex, Some(stored)) {
+        Verdict::Correct => ContainerAccess::Open,
+        _ => ContainerAccess::WrongCode,
+    }
+}
+
 fn encode_hex(bytes: &[u8]) -> String {
     let mut hex = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -1146,6 +1187,33 @@ mod tests {
         assert!(
             !may_set_code(None, 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef),
             "an unowned keypad (old save, dispenser) is nobody's to set"
+        );
+    }
+
+    #[test]
+    fn a_passcode_container_opens_for_its_owner_with_the_code() {
+        let owner = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef_u128;
+        let stranger = 0xdead_beef_dead_beef_dead_beef_dead_beef_u128;
+        let digest = hash_code("1234", SALT).unwrap();
+        assert_eq!(
+            container_access(Some(owner), owner, Some(&digest), SALT, "1234"),
+            ContainerAccess::Open,
+            "the owner with the right code opens the container"
+        );
+        assert_eq!(
+            container_access(Some(owner), owner, Some(&digest), SALT, "9999"),
+            ContainerAccess::WrongCode,
+            "a wrong code leaves a passcode container closed and its contents unreadable"
+        );
+        assert_eq!(
+            container_access(Some(owner), stranger, Some(&digest), SALT, "1234"),
+            ContainerAccess::NotOwner,
+            "the code alone does not open another player's container"
+        );
+        assert_eq!(
+            container_access(Some(owner), owner, None, SALT, "1234"),
+            ContainerAccess::NoCode,
+            "a container with no stored code cannot be checked"
         );
     }
 

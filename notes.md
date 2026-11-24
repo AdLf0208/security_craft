@@ -2077,3 +2077,214 @@ delta (`check-pin-updates.py`) — a module-screen or item-component surface wou
 recorded deviations. The in-game assertion for a carried container would be a placed block opened by
 its owner with its code, reading its saved contents and an unknown id refused, with a differential
 on an unprotected vanilla container.
+
+## Slice 9 — the passcode barrel (2026-11-24, SDK `0a875da`) — 0.2.10
+
+**Slice and gap line.** The last section's own `## Next slice` and the gap list's
+*"the passcode chest/barrel/furnace/smoker, keypad door and trapdoor"*. From
+that list this slice takes **the passcode barrel** (`securitycraft:keypad_barrel`),
+the cheapest container the pin can express. Class **content**, tier **deep** in
+the ledger; the delivered shape is the port's existing **logic + machines** half
+(a block with saved state and a code-check path, no new entity or renderer beyond
+what the block needs).
+
+**The jar inventory — chosen from the artefact, not a name.** The jar
+(`ports/_shared/carry-work/securitycraft/securitycraft-1.10.2.1.jar`, SHA-1
+`8760079e…3251`) carries these passcode container families:
+`keypad_barrel` (blockstate, two block models, five textures, loot table),
+`keypad_chest` / `keypad_chest_double` (entity-rendered chest textures),
+`keypad_furnace`, `keypad_smoker`, `keypad_blast_furnace` (lit + open states,
+cook-time machines), `keypad_trapdoor`, `keypad_door`, `keypad_frame`, and the
+`furnace_mine` / `smoker_mine` / `blast_furnace_mine` mine variants. The
+**barrel** is the cheapest faithful choice: a 12-state blockstate (6 `facing`
+× 2 `open`) against 26.3's barrel template, two models, five textures and one
+loot table; no lit states, no double block, no entity renderer. The jar's own
+48-variant blockstate (frog / lid_facing) is trimmed to the two properties the
+target version has. Its item model is the jar's `keypad_barrel`.
+
+**The pin gate — measured, not assumed.** The SDK stamps a 27-slot content menu
+(`data/<id>/horizon/menu/`) and `Registrar::block_container`; the game backs its
+slots with the mod block entity and the 27-slot screen is drawn through the
+`screen` Part. This is the same path the keypad's 1-slot menu uses, so no new
+menu surface is invented. The first probes established that a *native* menu
+opened with `PlayerRef::open_menu` shows empty slots whose clicks do not reach
+the block entity, and that `useItemOn` asks `useWithoutItem` next — so the
+one-shot open gate must not be consumed by the first use call. Both findings
+changed the implementation; the final leg proves the block-backed menu.
+
+### Red proof (TDD, before the rule existed)
+
+`src/runtime.rs` gained `ContainerAccess`, `container_access` (stubbed to
+`WrongCode`) and `a_passcode_container_opens_for_its_owner_with_the_code`
+first. Forwarded `cargo test --offline` (`slice9-red.log`) failed:
+
+```
+---- runtime::tests::a_passcode_container_opens_for_its_owner_with_the_code stdout ----
+
+thread 'runtime::tests::a_passcode_container_opens_for_its_owner_with_the_code' (542393) panicked at src/runtime.rs:1190:9:
+assertion `left == right` failed: the owner with the right code opens the container
+  left: WrongCode
+ right: Open
+
+test result: FAILED. 55 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+The rule became "owner first, then salted digests via the existing `submit`,
+then an open/wrong verdict"; `container_access` is pure and uses the same
+`may_set_code`/`submit` paths as the keypad, so deny-before-allow, the smart
+gate, the SHA-256 digest and the disguise render are untouched. A glue test
+(`the_barrel_container_uses_a_27_slot_mod_menu`) pins the slot count and menu.
+All **57** tests pass.
+
+### What the slice implements
+
+- **The pure rule** (`runtime::container_access`, `ContainerAccess`): a stranger
+  is refused before any digest work, a coded container with no code cannot be
+  checked, and only the owner's matching salted SHA-256 grants an open.
+- **Content.** `securitycraft:keypad_barrel` (the jar's block/item ids, 12-state
+  blockstate, two models, five 16×16 textures, loot table, lang and creative-tab
+  entry), plus the 27-slot menu type `securitycraft:keypad_barrel` and the
+  pickaxe-tag entry. The jar's five textures were extracted byte-for-byte.
+- **The gate.** The barrel's `BlockPart` cancels a right-click while no code has
+  granted an open; once granted, it returns `None` and the carried barrel
+  template opens its 27-slot menu. The grant is a saved integer, cleared when
+  that menu closes (so one code entry opens one session). The two use hooks and
+  the close hook are separate Part registrations — one Part type per block.
+- **Harness controls** (recorded as harness additions, not gameplay):
+  `/securitycraft cset <pos> <digits>` (owner sets the first code),
+  `/securitycraft copen <pos> <digits>` (checks it and grants the one-shot open)
+  and `/securitycraft cinfo <pos>` (reads `code=`, `open=`, `owner=`). A headless
+  harness cannot type into a second drawn screen; the port already drives code
+  entry through commands for the keypad.
+
+### Verification (0.2.10, SDK `0a875da`, 2026-11-24)
+
+Every Rust step ran in a **forwarded** `build-slot.sh` lease on `AdLf-PC`
+(`build-slot: forwarding … to the remote runner`, relative
+`--port ports/securitycraft`, `CARGO_INCREMENTAL=0`, **no `BUILD_LOCAL=1`**);
+the launcher build and the game legs stayed local (the e2e is `--offscreen`).
+Logs are in `../_shared/evidence/securitycraft/` and
+`../_shared/evidence/securitycraft-e2e/`.
+
+| Check | Evidence | Result |
+|---|---|---|
+| Red | `slice9-red.log` | **55 passed / 1 failed** (the new rule) |
+| Tests | `slice9-test.log`, `sdk-test.log` (regenerated for 0.2.10) | **57 passed**, 0 failed |
+| Format + lints | `slice9-fmt.log`, `slice9-clippy.log` | exit 0, **0 warnings** |
+| Two builds + `cmp` | `slice9-build.log` | **byte-identical**; `rm -f Cargo.lock` before each |
+| Delivered | `securitycraft.hmod` | **83,579 B**, SHA-256 `2829d08f2d21a71db2e47381215d0d50f3fbdaba0c18ee29b632fa20e1d41841`, **78 entries**, no `Cargo.lock`, version 0.2.10 |
+| Registry check | `slice9-check-fits.log` | `securitycraft 0.2.10 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, same SHA, EXIT 0 |
+| Pinned build | `slice9-check-fits.log` | `0a875da  made for`, EXIT 0 |
+| Another build | `slice9-check-fits.log` | `0b14f8a  fits`, EXIT 0, same SHA |
+| Gate | `slice9-verify-sdk-package.log` | **1/1**, incl. `package matches the tree`, SDK-only deps, no lock, 57 tests |
+| Launcher build | `slice9-launcher-build.log` | `Compiling securitycraft (1 of 1)`, `native-0a875da-fa8e073dbac3 built` |
+| In-game PASS | `securitycraft-e2e/e2e-launcher.log` | **PASS + `EXIT:0`**, all 19 phases incl. phase 19 |
+| Control (unmodified Nightly) | `e2e-control.log` | **`EXIT:1`** at phase 1, the package's ids are unknown |
+| Ids-unknown control | `e2e-ids-unknown.log` | PASS + `EXIT:0`, both ids unknown |
+| Prior SELFTESTs (`1`/harming/nonloot/owner/relaunch/allow/deny/smart/disguise) | `e2e-selftest*.log` | **`EXIT:1`** at each own assertion |
+| SELFTEST (container) | `e2e-selftest-container.log` | **`EXIT:1`** at phase 19, "expected a wrong code to leave the barrel's contents unreadable" |
+| Log checker | `slice9-check-e2e-logs.log` | `logs=16 ok=16`, exit 0 |
+| Recipe types | `check-recipe-types.py securitycraft` | `securitycraft: ok`, exit 0 |
+
+Phase 19 in the PASS leg (`e2e-launcher.log`):
+
+```
+securitycraft barrel 13 101 12 code=set open=0 owner=set
+wrong-code click: screen=playing container slots=0
+securitycraft barrel 13 101 12 code=set open=1 owner=set
+unlocked interact: … reply={...,"ok":true,"screen":"container"}
+unlocked barrel container slots: 27
+saved barrel slot 300: minecraft:iron_ingot x8
+after closing: securitycraft barrel 13 101 12 code=set open=0 owner=set
+unknown id reply: {"error":"unknown item securitycraft:no_such_block"}
+barrel slot 300 after the relaunch: minecraft:iron_ingot x8
+```
+
+Both value pairs are fail-capable: `SELFTEST=container` inverts the "wrong code
+opens nothing" assertion and fails exactly there; the vanilla barrel opened at
+the same position without any code (27 slots) is the differential, and a wrong
+code's click left `screen=playing` with zero container slots. The relaunch leg
+reads the saved slot from the block entity after a fresh game start. Several
+pre-existing harness flakes (a placement at phase 14/17 and one health read at
+phase 10) stopped intermediate legs; each identical leg was retried unchanged
+and the flake logs remain in `securitycraft-e2e/`. `ctl messages` stays at **8**
+(the widened `30` broke phase 2 in slice 8).
+
+### Coverage added by this slice
+
+| Family | Status |
+|---|---|
+| `securitycraft:keypad_barrel` block/item (give, place, read back) | **tested** — phase 19: `block_name` and `block_state` |
+| owner recorded on placement | **tested** — phase 19: `owner=set` |
+| the owner sets the first code; a second set is refused | **tested** — phase 19: `code=set`, "a second set" |
+| wrong code → no permission, no menu, no slots | **tested** — phase 19: `open=0`, `screen=playing`, 0 slots; inverted by `SELFTEST=container` |
+| right code → 27-slot container menu opens | **tested** — phase 19: `screen=container`, 27 slots |
+| saved contents survive a restart | **tested** — phase 19: `minecraft:iron_ingot x8` before and after relaunch |
+| an unknown id is refused | **tested** — phase 19: parsed `{"error":"unknown item …"}` |
+| unprotected vanilla barrel (differential) | **tested** — phase 19: 27 slots, no code |
+| the pure owner/code rule | **unit test** `a_passcode_container_opens_for_its_owner_with_the_code` |
+| keypad chest / furnace / smoker / blast furnace, keypad door / trapdoor | **not ported** — the remaining gap list families |
+| a drawn code GUI for the barrel | **not ported** — harness command recorded as a deviation below |
+| disguise/allowlist/denylist/smart/harming modules on a barrel | **not ported** — modules install on keypads only |
+
+### Deviations recorded by this slice
+
+1. **The barrel's code check is a harness command, not a drawn second screen.**
+   Upstream reuses the keypad's check GUI for every passcode container; the
+   pin *can* stamp a screen, but a single `horizon-ctl` harness cannot type into
+   a second panel while driving the keypad phases. The port's established
+   convention for such paths is a harness command (`/securitycraft code`,
+   `/owner`, `/allow`, `/deny`); `/securitycraft cset|copen|cinfo` follows it.
+2. **A content menu type, not the vanilla `minecraft:generic_9x3` id.** A native
+   menu opened with `PlayerRef::open_menu` showed empty slots whose clicks did
+   not reach the block entity; the barrel therefore declares its own
+   `securitycraft:keypad_barrel` 27-slot menu and draws a vanilla-shaped panel.
+   The slot layout, count and saved items are those of a 9×3 chest.
+3. **The one-shot grant is cleared at menu close, not at the granting right
+   click.** `useItemOn` asks `useWithoutItem` next; consuming the grant in the
+   first call made the second call cancel the very click that should open the
+   menu (measured). The saved `open` integer is cleared by
+   `player_container_close`, so one code entry opens one session.
+4. **The blockstate is trimmed to 26.3's two properties.** The jar's
+   `keypad_barrel` has 48 variants (`facing`, `open`, `frog`, `lid_facing`);
+   the target version has only `facing` and `open`, so the carried file has 12.
+5. **The loot table is simplified**: a survives-explosion pool dropping the
+   barrel item, without the jar's `copy_components` custom-name transfer.
+6. **Only the barrel is ported from the container family.** The chest needs an
+   entity-rendered lid, and the furnace/smoker need lit states and cook-time
+   machines; neither fits "the cheapest family the pin can express" as directly.
+
+### Changelog for the resubmission (0.2.10)
+
+> Supersedes the staged 0.2.9 record. Carries the jar's `keypad_barrel` (12-state
+> blockstate, two models, five textures, loot table and lang) as a 27-slot
+> passcode container: its placer is the owner, only the owner may set the first
+> code, a wrong code leaves it closed with no readable slots, and the right code
+> opens a 9×3 panel whose saved contents survive a relaunch. A new pure
+> owner-and-digest access rule and a one-shot open gate are added; the SHA-256
+> primitive, SDK-only dependency set, save format, deny-before-allow order,
+> smart-module gate and disguise render are unchanged.
+
+Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices,rust-review,rust-port
+
+## Next slice
+
+**Family:** the **passcode chest** (`securitycraft:keypad_chest`), the closest
+companion of this barrel and the next line of the gap list
+(*"the passcode chest/barrel/furnace/smoker"*). It fits tier **deep** in the same
+logic+machines shape: a carried block with saved owner/code state, the same pure
+`container_access` rule, the same one-shot gate and harness commands, a new block
+id with the jar's entity-chest textures and a 27-slot menu — no new entity or
+renderer beyond what the chest block requires. The barrel's machinery is now
+proved, so only the chest's id/content and its double-chest loot need porting.
+
+**In-game assertion that would prove it:** place a passcode chest, set its code
+as the owner with `/securitycraft cset`, confirm a wrong `/securitycraft copen`
+leaves `open=0`, `screen=playing` and zero container slots; the right code then
+opens 27 slots, eight deposited ingots read back as `minecraft:iron_ingot x8`,
+and after a quit-and-relaunch the same code opens the chest with the slot still
+holding eight ingots. The differential is a vanilla chest at the same position
+(the container opens with no code). `SELFTEST=chest` inverts the wrong-code
+assertion and must end `EXIT:1`. If the chest's entity-rendered lid cannot be
+expressed at this pin, stop with `blocked(<symbol>)` and evidence rather than
+inventing a renderer.

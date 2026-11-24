@@ -148,6 +148,75 @@ impl ItemPart for KeyPanel {
     }
 }
 
+/// The passcode barrel: a block with a saved code and a one-shot open gate in front of its
+/// 27-slot container. Its block item records the placer as the owner, as the key panel does.
+struct ContainerItem;
+
+#[mod_api::horizon_part]
+impl ItemPart for ContainerItem {
+    fn on_block_placed_by(&self, host: &mut dyn ServerHost, event: &mut OnBlockPlacedByEvent<'_>) {
+        support::on_block_placed_by(host, event);
+    }
+}
+
+/// The passcode barrel's block. It gates the click that would open the container menu.
+struct ContainerBlock;
+
+#[mod_api::horizon_part]
+impl BlockPart for ContainerBlock {
+    /// A click with an item: no code-verified open permission means the container's own use
+    /// (which would open its menu) must not run.
+    fn use_item_on(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut UseItemOnEvent<'_>,
+    ) -> Option<InteractionResult> {
+        support::on_container_use(host, event.click)
+    }
+
+    /// The same, with an empty hand.
+    fn use_without_item(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut UseWithoutItemEvent<'_>,
+    ) -> Option<InteractionResult> {
+        support::on_container_use(host, event.click)
+    }
+}
+
+/// The passcode barrel's block entity: the code, the salt and the open gate, with the game
+/// backing its 27 item slots. A separate type from the block Part — one Part type per block.
+struct ContainerEntity;
+
+#[mod_api::horizon_part]
+impl BlockPart for ContainerEntity {}
+
+#[mod_api::horizon_part]
+impl BlockEntityPart for ContainerEntity {
+    fn block_entity(
+        &self,
+        _level: LevelSide<'_>,
+        _event: &mut BlockEntityEvent<'_>,
+    ) -> Option<mod_api::Compound> {
+        support::on_block_entity()
+    }
+
+    /// A barrel's open/close animation and viewer count are ticked by its template; keep the
+    /// block entity's ticker so carried containers behave as vanilla barrels do.
+    fn block_entity_ticks(&self, _host: &dyn mod_api::Host, event: &mut BlockEntityTicksEvent<'_>) {
+        support::on_ticks(event);
+    }
+
+    /// The 27-slot chest panel shown when the content menu opens.
+    fn screen(
+        &self,
+        _host: &dyn mod_api::Host,
+        _event: &mut mod_api::ScreenEvent<'_>,
+    ) -> Option<Screen> {
+        Some(support::barrel_screen())
+    }
+}
+
 #[derive(Default)]
 struct Mod;
 
@@ -170,10 +239,27 @@ impl Hooks for Mod {
             ));
             return;
         }
-        r.block_container(&block, support::container());
+        r.block_container(&block, support::keypad_container());
         // Bound first: `r.item_part(r.item_key(…), …)` borrows `r` twice.
         let item = r.item_key(support::KEYPAD_ITEM);
         r.item_part(item, KeyPanel);
+        // The passcode barrel: its own block entity, a 27-slot container shown as the
+        // vanilla 9×3 menu, and the item whose placement records its owner.
+        let container = r.block_key(support::CONTAINER);
+        let container_kind = r
+            .block_entity_type(support::CONTAINER_ENTITY)
+            .blocks(&[support::CONTAINER])
+            .build();
+        if let Err(error) = r.block_entity_part(&container_kind, ContainerEntity) {
+            cx.refuse(&format!(
+                "securitycraft: the passcode barrel part was refused: {error}"
+            ));
+            return;
+        }
+        r.block_part(container, ContainerBlock);
+        r.block_container(&container, support::barrel_container());
+        let container_item = r.item_key(support::CONTAINER);
+        r.item_part(container_item, ContainerItem);
         // A removal hook only has a `LevelHost`, which cannot resolve an id, so the
         // keys of all four droppable modules are stored once here.
         let harming_module = r.item_key(support::HARMING_MODULE);
@@ -212,6 +298,20 @@ impl Hooks for Mod {
             "securitycraft deny <pos:block_pos> <who:word>",
             2,
         ));
+        // The passcode barrel's harness controls: a headless harness cannot type into a
+        // screen, and no second player can be driven, so the code check and its owner are
+        // exercised through these commands (recorded as harness additions in notes.md).
+        event.commands.push(mod_api::Command::op(
+            "securitycraft cset <pos:block_pos> <code:word>",
+            2,
+        ));
+        event.commands.push(mod_api::Command::op(
+            "securitycraft copen <pos:block_pos> <code:word>",
+            2,
+        ));
+        event
+            .commands
+            .push(mod_api::Command::new("securitycraft cinfo <pos:block_pos>"));
     }
 
     /// A menu a mod opened closed, or its player left: every digit that player typed is gone.
@@ -223,11 +323,15 @@ impl Hooks for Mod {
     /// keypad session at that block is forgotten as well.
     fn player_container_close(
         &self,
-        _host: &mut dyn ServerHost,
+        host: &mut dyn ServerHost,
         event: &mut PlayerContainerCloseEvent<'_>,
     ) {
         if event.menu == support::KEYPAD_MENU {
             support::on_container_closed(event.player, event.dimension, event.pos);
+        } else if event.menu == support::CONTAINER_MENU
+            && let Some(pos) = event.pos
+        {
+            support::on_barrel_container_closed(host, event.player, event.dimension, pos);
         }
     }
 

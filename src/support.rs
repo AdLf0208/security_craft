@@ -33,14 +33,25 @@ use mod_api::{
 
 use crate::runtime::{
     Action, Button, DEFAULT_SIGNAL_TICKS, Entry, ListData, Mode, Throttle, after_submit, button,
-    cooldown_allows, cooldown_failed, disguise_tint, facing_from_yaw, hash_code, is_allowed,
-    is_denied, may_install, may_set_code, new_salt, tick_signal, valid_code, wrong_code_damage,
+    container_access, cooldown_allows, cooldown_failed, disguise_tint, facing_from_yaw, hash_code,
+    is_allowed, is_denied, may_install, may_set_code, new_salt, tick_signal, valid_code,
+    wrong_code_damage,
 };
 
 /// The keypad block; its item (`securitycraft:keypad_item`) places it.
 pub(crate) const KEYPAD: &str = "securitycraft:keypad";
 /// The key panel item: the item part that records the keypad's owner.
 pub(crate) const KEYPAD_ITEM: &str = "securitycraft:keypad_item";
+/// The passcode barrel: the jar's `keypad_barrel`, carried as a `minecraft:barrel`
+/// template with a 27-slot container and a saved code.
+pub(crate) const CONTAINER: &str = "securitycraft:keypad_barrel";
+/// The block entity type of the passcode barrel.
+pub(crate) const CONTAINER_ENTITY: &str = "keypad_barrel";
+/// The vanilla 9×3 menu the barrel's 27 slots open, so hoppers, comparators,
+/// shift-clicks and a relaunch use the game's own container paths.
+pub(crate) const CONTAINER_MENU: &str = "securitycraft:keypad_barrel";
+/// A vanilla barrel holds 27 items.
+const CONTAINER_SLOTS: usize = 27;
 /// The reinforced door block, whose item is the block's own (the double-high
 /// placement of `minecraft:iron_door`).
 pub(crate) const DOOR: &str = "securitycraft:iron_door_reinforced";
@@ -62,6 +73,11 @@ const KEY_MODE: &str = "mode";
 const KEY_ENTRY: &str = "entry";
 const KEY_STATUS: &str = "status";
 const KEY_SIGNAL: &str = "signal";
+/// The passcode barrel's one-shot permission to open: set by a correct code,
+/// spent by the right-click that opens the container's menu. It is saved so a
+/// code entered just before a relaunch still opens the barrel, but never holds
+/// the digits themselves.
+const KEY_OPEN: &str = "open";
 /// The UUID (32 lowercase hex digits, no dashes) of the player who placed the keypad.
 const KEY_OWNER: &str = "owner";
 /// The module ids installed in the keypad, as a list of strings.
@@ -1186,7 +1202,7 @@ pub(crate) fn on_level_tick_post(host: &mut dyn ServerHost, event: &mut LevelTic
 
 /// The keypad's container: one hidden slot (no face exposes it, so no hopper
 /// can put anything in) and the mod menu the block's use opens.
-pub(crate) fn container() -> ModContainer {
+pub(crate) fn keypad_container() -> ModContainer {
     ModContainer {
         slots: 1,
         faces: std::array::from_fn(|_| Vec::new()),
@@ -1333,6 +1349,194 @@ fn set_code(
         .map_err(|_| "No keypad at that position.".to_owned())?;
     let _ = entity.set_data_slots(host, slots);
     Ok("Code set.".to_owned())
+}
+
+// --- the passcode barrel ----------------------------------------------------
+
+/// The barrel's screen: a vanilla-shaped 9×3 chest panel so its 27 slots are
+/// visible and clickable through the game's mod-menu path.
+pub(crate) fn barrel_screen() -> Screen {
+    Screen {
+        width: 176.0,
+        height: 166.0,
+        slots: (0..CONTAINER_SLOTS)
+            .map(|i| Some([8.0 + (i % 9) as f32 * 18.0, 18.0 + (i / 9) as f32 * 18.0]))
+            .collect(),
+        inventory_y: 84.0,
+        inventory_x: 8.0,
+        own_labels: false,
+        own_background: false,
+        ..Screen::default()
+    }
+}
+
+/// The barrel's container: 27 item slots exposed on every face, shown through
+/// the mod's 27-slot content menu (the game's mod-menu path the keypad uses).
+pub(crate) fn barrel_container() -> ModContainer {
+    let all: Vec<usize> = (0..CONTAINER_SLOTS).collect();
+    ModContainer {
+        slots: CONTAINER_SLOTS,
+        faces: std::array::from_fn(|_| all.clone()),
+        inputs: all.clone(),
+        outputs: all,
+        menu: Some(CONTAINER_MENU.to_owned()),
+    }
+}
+
+/// A right click on the passcode barrel. A correct code grants a one-shot open
+/// permission (`KEY_OPEN`); without it the click is ended before the content
+/// block can open its 27-slot menu, so a wrong code leaves the contents
+/// unreadable. With it the click runs the barrel's own use and the vanilla
+/// container menu opens, backed by the block entity's saved item slots.
+pub(crate) fn on_container_use(
+    host: &mut dyn ServerHost,
+    click: &mod_api::BlockClick<'_>,
+) -> Option<InteractionResult> {
+    let level = in_place_level(host)?;
+    let entity = host.block_entity(level, click.pos)?;
+    let data = entity.data(&*host)?;
+    if int(&data, KEY_OPEN) == 0 {
+        return Some(InteractionResult::Fail);
+    }
+    // Do not spend the grant here: `useItemOn` asks `useWithoutItem` next, and
+    // the second call would then refuse the very click the first let through.
+    // The one-shot permission is cleared when the container menu closes.
+    // None: the carried `minecraft:barrel` block opens its own container menu.
+    None
+}
+
+/// The barrel's menu closed: spend the one-shot permission so a later right-click
+/// needs another code check (upstream closes and re-locks the container).
+pub(crate) fn on_barrel_container_closed(
+    host: &mut dyn ServerHost,
+    player: u128,
+    dimension: &str,
+    pos: [i32; 3],
+) {
+    let _ = player;
+    let Some(level) = host.level(dimension) else {
+        return;
+    };
+    let Some(entity) = host.block_entity(level, pos) else {
+        return;
+    };
+    let mut data = entity.data(&*host).unwrap_or_default();
+    if int(&data, KEY_OPEN) != 0 {
+        set_int(&mut data, KEY_OPEN, 0);
+        let _ = entity.replace_data(host, data);
+    }
+}
+
+/// `/securitycraft cset <pos> <digits>`: sets a passcode barrel's first code.
+/// The same owner rule as a keypad's `/securitycraft code`; the digest and salt
+/// are the port's own SHA-256, so a barrel's code survives a restart.
+fn set_container_code(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    code: &str,
+    asking: Option<u128>,
+) -> Result<String, String> {
+    if !valid_code(code) {
+        return Err("A code is four to twenty digits.".to_owned());
+    }
+    if block_at(&*host, level, pos) != CONTAINER {
+        return Err("No passcode barrel at that position.".to_owned());
+    }
+    let entity = host
+        .block_entity(level, pos)
+        .ok_or_else(|| "No passcode barrel at that position.".to_owned())?;
+    let mut data = entity
+        .data(&*host)
+        .ok_or_else(|| "No passcode barrel at that position.".to_owned())?;
+    if has(&data, KEY_CODE) {
+        return Err("That barrel already has a code.".to_owned());
+    }
+    if !asking.is_some_and(|player| may_set_code(owner_of(&data), player)) {
+        return Err("Only the barrel's owner can set its code.".to_owned());
+    }
+    let salt = fresh_salt(host).ok_or_else(|| "No passcode barrel at that position.".to_owned())?;
+    let digest = hash_code(code, &salt).unwrap_or_default();
+    set_string(&mut data, KEY_SALT, &salt);
+    set_string(&mut data, KEY_CODE, &digest);
+    set_int(&mut data, KEY_STATUS, STATUS_SET);
+    set_int(&mut data, KEY_OPEN, 0);
+    entity
+        .replace_data(host, data)
+        .map_err(|_| "No passcode barrel at that position.".to_owned())?;
+    Ok("Barrel code set.".to_owned())
+}
+
+/// `/securitycraft copen <pos> <digits>`: the barrel's code-check path. The
+/// player must own the barrel and type its code; on a match a one-shot open
+/// permission is saved. A wrong code writes nothing, so the container stays
+/// closed and its contents stay unreadable.
+fn unlock_container(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    code: &str,
+    asking: Option<u128>,
+) -> Result<String, String> {
+    if block_at(&*host, level, pos) != CONTAINER {
+        return Err("No passcode barrel at that position.".to_owned());
+    }
+    let entity = host
+        .block_entity(level, pos)
+        .ok_or_else(|| "No passcode barrel at that position.".to_owned())?;
+    let mut data = entity
+        .data(&*host)
+        .ok_or_else(|| "No passcode barrel at that position.".to_owned())?;
+    let stored = string(&data, KEY_CODE);
+    let salt = string(&data, KEY_SALT).unwrap_or_default();
+    let verdict = container_access(
+        owner_of(&data),
+        asking.unwrap_or(0),
+        stored.as_deref(),
+        &salt,
+        code,
+    );
+    match verdict {
+        crate::runtime::ContainerAccess::Open => {
+            set_int(&mut data, KEY_OPEN, 1);
+            set_int(&mut data, KEY_STATUS, STATUS_OPENED);
+            entity
+                .replace_data(host, data)
+                .map_err(|_| "The barrel could not open.".to_owned())?;
+            // The one-shot permission is consumed by the right-click that opens the
+            // container's own block-backed menu (`on_container_use`). Using the game's
+            // block menu, rather than a virtual menu `open_menu` would create, keeps the
+            // 27 item slots backed by this block entity: deposits and a relaunch persist.
+            Ok("Barrel unlocked.".to_owned())
+        }
+        crate::runtime::ContainerAccess::NotOwner => {
+            Err("Only the barrel's owner may enter its code.".to_owned())
+        }
+        crate::runtime::ContainerAccess::NoCode => Err("The barrel has no code set.".to_owned()),
+        crate::runtime::ContainerAccess::WrongCode => Err("Wrong code.".to_owned()),
+    }
+}
+
+/// `/securitycraft cinfo <pos>`: the harness readout of a barrel's saved gate.
+fn container_info(host: &dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Option<String> {
+    if block_at(host, level, pos) != CONTAINER {
+        return None;
+    }
+    let entity = host.block_entity(level, pos)?;
+    let data = entity.data(host)?;
+    Some(format!(
+        "securitycraft barrel {} {} {} code={} open={} owner={}",
+        pos[0],
+        pos[1],
+        pos[2],
+        if has(&data, KEY_CODE) { "set" } else { "none" },
+        int(&data, KEY_OPEN),
+        if owner_of(&data).is_some() {
+            "set"
+        } else {
+            "none"
+        },
+    ))
 }
 
 /// The UUID `/securitycraft owner … stranger` writes: no player has it, so the
@@ -1591,6 +1795,37 @@ pub(crate) fn command(
                 .into_iter()
                 .find(|level| level.dimension() == invocation.dimension)?;
             Some(set_deny(host, level, pos, who, asking).unwrap_or_else(|line| line))
+        }
+        ["securitycraft", "cset"] | ["securitycraft", "copen"] | ["securitycraft", "cinfo"] => {
+            let Some(mod_api::CommandArgumentValue::BlockPos(pos)) = invocation.argument("pos")
+            else {
+                return Some("Usage: /securitycraft cset|copen|cinfo <x> <y> <z>".to_owned());
+            };
+            let pos = *pos;
+            let level = host
+                .levels()
+                .list_levels()
+                .into_iter()
+                .find(|level| level.dimension() == invocation.dimension)?;
+            match literals[1] {
+                "cinfo" => container_info(host, level, pos),
+                "cset" => {
+                    let Some(mod_api::CommandArgumentValue::String(code)) =
+                        invocation.argument("code")
+                    else {
+                        return Some("Usage: /securitycraft cset <x> <y> <z> <digits>".to_owned());
+                    };
+                    Some(set_container_code(host, level, pos, code, asking).unwrap_or_else(|e| e))
+                }
+                _ => {
+                    let Some(mod_api::CommandArgumentValue::String(code)) =
+                        invocation.argument("code")
+                    else {
+                        return Some("Usage: /securitycraft copen <x> <y> <z> <digits>".to_owned());
+                    };
+                    Some(unlock_container(host, level, pos, code, asking).unwrap_or_else(|e| e))
+                }
+            }
         }
         _ => None,
     }
@@ -1852,6 +2087,23 @@ mod tests {
             ],
             "the disguise module drops through the same path as the other four"
         );
+    }
+
+    #[test]
+    fn the_barrel_container_uses_a_27_slot_mod_menu() {
+        let container = barrel_container();
+        assert_eq!(container.slots, 27, "a barrel holds 27 items");
+        assert_eq!(
+            container.menu.as_deref(),
+            Some(CONTAINER_MENU),
+            "the carried container opens through its 27-slot content menu"
+        );
+        assert!(
+            container.faces.iter().all(|face| face.len() == 27),
+            "every face reaches the whole container, as a vanilla barrel does"
+        );
+        assert_eq!(container.inputs.len(), 27);
+        assert_eq!(container.outputs.len(), 27);
     }
 
     #[test]

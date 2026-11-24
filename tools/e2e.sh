@@ -66,6 +66,11 @@
 # 15. RELAUNCH: the same world is quit and started again; the code stored before the
 #     restart still opens the same keypad and a wrong code is still refused, so the
 #     digest is recomputed from the saved salt rather than held in the session.
+# 19. CONTAINER: the carried passcode barrel saves an owner and a code; a wrong code
+#     leaves it closed with no container slots, the right code opens its 27 vanilla
+#     slots, an unknown id is refused, eight deposited ingots survive a restart, and
+#     an unprotected vanilla barrel opens without any code. `SELFTEST=container`
+#     inverts the wrong-code assertion and must end EXIT:1.
 #
 #   tools/e2e.sh               # the scenario above
 #   SELFTEST=1 tools/e2e.sh    # phase 4 expects the door CLOSED: must exit 1
@@ -77,6 +82,7 @@
 #   SELFTEST=deny tools/e2e.sh     # phase 16 expects a denied click to open a screen: exit 1
 #   SELFTEST=smart tools/e2e.sh    # phase 3b expects a no-module cooldown: exit 1
 #   SELFTEST=disguise tools/e2e.sh # phase 18 expects no green tint: exit 1
+#   SELFTEST=container tools/e2e.sh # phase 19 expects a locked barrel's slots: exit 1
 #   CONTROL=1 tools/e2e.sh     # no package at all: the ids must be unknown
 #   GAME=<an unmodified game> tools/e2e.sh   # the differential: the first phase fails
 #
@@ -1189,5 +1195,150 @@ echo "the right code after the relaunch: $line"
 [ "$(door_open "$DOOR_X" 101 "$DOOR_Z")" = true ] || fail "the keypad's signal after the relaunch did not open the door"
 ctl close >/dev/null 2>&1 || true
 
-echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes did NOT rate-limit a correct one without the smart module; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke — and survived a level-side /setblock removal as a dropped item; a keypad without the module did not hurt a wrong code; and only the owner may set a keypad's first code — a stranger's click opened no set screen, a set screen that outlived an owner change stored nothing, the owner set it, and a stranger's /securitycraft code was refused; the allowlist module crafted from seven iron and two paper was installed on a coded keypad and an allowed click with nothing typed powered it and opened its door without a code screen, while swapping the player for a stranger restored the code screen and left the door closed; the denylist module crafted from seven iron, paper and an ink sac was installed on a coded keypad and a listed player's click opened nothing, powered nothing and left the door closed, while swapping the list to a stranger restored the code screen with the door still closed; the smart module crafted from seven iron, paper and an ender pearl was installed on a second coded keypad and five wrong codes then made the right one read status=6 with the keypad unpowered and the door closed, while the same five wrong codes on a keypad without the module still opened it; the disguise module crafted from seven iron, paper and a painting was installed on a fresh keypad and an --offscreen screenshot of that very keypad changed from its own texture to the fixed green tint (a parsed pixel difference, inverted by SELFTEST=disguise); and after quitting and relaunching the same world the code stored before the restart still opens the keypad and a wrong code is still refused"
+say "phase 19: the passcode barrel keeps a saved code and opens its 27 slots only with it"
+# The jar's keypad_barrel is carried as a minecraft:barrel, so its container is the
+# vanilla 9x3 menu the pin already stamps (no new menu surface). The code check is a
+# harness command — a headless harness cannot type into a second drawn screen — and
+# the gate is the same owner + salted-digest rule the keypad uses.
+# Place beside the player's *current* position: a `ctl tp` after the phase-15
+# relaunch can be acknowledged without moving the player, and `ctl place` needs
+# a solid neighbour within reach.
+CURX=$(ctl state | jq -r '.player.position[0] | floor')
+CURZ=$(ctl state | jq -r '.player.position[2] | floor')
+BX=$((CURX-2)); BY=101; BZ=$CURZ
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl wait 2
+ctl give securitycraft:keypad_barrel 1 >/dev/null || fail "the game refused securitycraft:keypad_barrel: the package is not loaded"
+ctl give minecraft:barrel 1 >/dev/null || fail "the game refused a vanilla barrel"
+ctl give minecraft:iron_ingot 8 >/dev/null
+ctl wait 6
+ctl close >/dev/null 2>&1 || true
+ctl wait 2 >/dev/null
+echo "barrel target $BX,$BY,$BZ; player: $(ctl state | jq -c '.player.position')"
+
+# Differential first, on the same position: an unprotected vanilla barrel opens
+# without any code. It is removed before the passcode barrel is placed so it
+# cannot stand between the player and the barrel's clickable face.
+ctl select minecraft:barrel >/dev/null
+reply=$(ctl place "$BX" "$BY" "$BZ" 2>&1)
+echo "vanilla barrel place reply: $reply"
+echo "$reply" | jq -e '.changed == true' >/dev/null || fail "the vanilla barrel did not place ($reply)"
+ctl wait 4
+ctl look 180 0 >/dev/null
+ctl wait 2 >/dev/null
+ctl look-at block "$BX" "$BY" "$BZ" >/dev/null 2>&1 || true
+ctl interact "$BX" "$BY" "$BZ" >/dev/null || fail "the vanilla barrel did not open"
+ctl wait 6
+vanilla_slots=$(ctl screen | jq '[.slots[]? | select(.slot >= 300)] | length')
+echo "unprotected vanilla barrel container slots: $vanilla_slots"
+[ "$vanilla_slots" = 27 ] || fail "the vanilla barrel showed $vanilla_slots slots, expected 27"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4
+ctl command "setblock $BX $BY $BZ minecraft:air" >/dev/null
+ctl wait 4
+
+ctl select securitycraft:keypad_barrel >/dev/null
+reply=$(ctl place "$BX" "$BY" "$BZ" 2>&1)
+echo "passcode barrel place reply: $reply"
+echo "$reply" | jq -e '.changed == true' >/dev/null || fail "the passcode barrel did not place ($reply)"
+ctl wait 4
+echo "block after place: $(block_name "$BX" "$BY" "$BZ") / state $(block_state "$BX" "$BY" "$BZ")"
+block_name "$BX" "$BY" "$BZ" | grep -qx securitycraft:keypad_barrel || fail "no passcode barrel at $BX,$BY,$BZ"
+
+cinfo() { ctl chat "/securitycraft cinfo $1 $2 $3" >/dev/null; ctl wait 4; ctl messages 8 | jq -r '.chat[]' | grep -m1 '^securitycraft barrel ' || true; }
+container_cmd() { ctl chat "/securitycraft $1 $BX $BY $BZ $2" 2>&1; ctl wait 4; }
+
+# Only the owner may set the first code; the readout reports the saved gate.
+reply=$(container_cmd cset 4321); echo "code set reply: $(echo "$reply" | jq -r '.chat[0] // .error // .' 2>/dev/null)"
+line=$(cinfo "$BX" "$BY" "$BZ"); echo "coded barrel: $line"
+[ "$(field code "$line")" = set ] || fail "the barrel did not save its code: $line"
+[ "$(field open "$line")" = 0 ] || fail "a fresh coded barrel is already open: $line"
+[ "$(field owner "$line")" = set ] || fail "the barrel's placer is not its owner: $line"
+reply=$(container_cmd cset 9999); echo "a second set: $(echo "$reply" | jq -r '.chat[0] // .error // .' 2>/dev/null)"
+# An empty hand makes the block's own use (`use_without_item`) open its container.
+ctl command "clear @s" >/dev/null
+ctl wait 2
+
+# A wrong code writes no open permission: the right click ends before the menu opens.
+reply=$(container_cmd copen 9999); echo "wrong code reply: $(echo "$reply" | jq -r '.chat[0] // .error // .' 2>/dev/null)"
+line=$(cinfo "$BX" "$BY" "$BZ"); echo "after a wrong code: $line"
+[ "$(field open "$line")" = 0 ] || fail "a wrong code left the barrel open: $line"
+ctl tp "$((BX+1)).5" "$BY" "$((BZ+2)).5" >/dev/null
+ctl wait 4
+ctl look 180 0 >/dev/null
+ctl wait 2
+ctl look-at block "$BX" "$BY" "$BZ" >/dev/null 2>&1 || true
+ctl interact "$BX" "$BY" "$BZ" >/dev/null 2>&1 || true
+ctl wait 6
+locked_screen=$(ctl screen | jq -r '.screen // "unknown"')
+locked_slots=$(ctl screen | jq '[.slots[]? | select(.slot >= 300)] | length')
+echo "wrong-code click: screen=$locked_screen container slots=$locked_slots"
+if [ "$SELFTEST" = container ]; then
+    [ "$locked_slots" -gt 0 ] || fail "SELFTEST: expected a wrong code to leave the barrel's contents unreadable"
+fi
+[ "$locked_screen" = playing ] || fail "a wrong code opened the barrel menu (screen=$locked_screen)"
+[ "$locked_slots" = 0 ] || fail "a wrong code exposed the barrel's $locked_slots container slots"
+ctl close >/dev/null 2>&1 || true
+
+# The right code grants a one-shot open; the container's saved slots can be read.
+reply=$(container_cmd copen 4321); echo "right code reply: $(echo "$reply" | jq -r '.chat[0] // .error // .' 2>/dev/null)"
+line=$(cinfo "$BX" "$BY" "$BZ"); echo "after the right code: $line"
+[ "$(field open "$line")" = 1 ] || fail "the right code did not grant an open: $line"
+# The grant is spent by the right-click that opens the block's own 27-slot menu;
+# that menu is backed by the barrel's saved item slots, so a deposit persists.
+ctl look 180 0 >/dev/null
+ctl wait 2 >/dev/null
+ctl look-at block "$BX" "$BY" "$BZ" >/dev/null 2>&1 || true
+reply=$(ctl interact "$BX" "$BY" "$BZ" 2>&1 || true)
+echo "unlocked interact: player=$(ctl state | jq -c '.player.position') reply=$reply"
+echo "$reply" | jq -e '.ok == true' >/dev/null || fail "the unlocked barrel did not open ($reply)"
+ctl wait 6
+echo "unlocked screen: $(ctl screen | jq -r '.screen // "unknown"')"
+slots=$(ctl screen | jq '[.slots[]? | select(.slot >= 300)] | length')
+echo "unlocked barrel container slots: $slots"
+[ "$slots" = 27 ] || fail "the unlocked barrel showed $slots slots, expected 27"
+line=$(cinfo "$BX" "$BY" "$BZ"); echo "while open: $line"
+[ "$(field open "$line")" = 1 ] || fail "the barrel lost its open permission before the menu closed: $line"
+# Deposit through the barrel's own container slot (the game writes the block
+# entity's saved `Items`), then read it back through the open menu.
+ctl command "item replace block $BX $BY $BZ container.0 with minecraft:iron_ingot 8" >/dev/null
+ctl wait 4
+stored=$(ctl screen | jq -r '[.slots[]? | select(.slot == 300) | .item][0] // "empty"')
+count=$(ctl screen | jq -r '[.slots[]? | select(.slot == 300) | .count][0] // 0')
+echo "saved barrel slot 300: $stored x$count"
+[ "$stored" = minecraft:iron_ingot ] && [ "$count" = 8 ] \
+    || fail "the barrel did not save 8 iron ingots ($stored x$count)"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4
+line=$(cinfo "$BX" "$BY" "$BZ"); echo "after closing: $line"
+[ "$(field open "$line")" = 0 ] || fail "the one-shot open permission was not spent at close: $line"
+
+# An unknown id is refused, as a parsed error rather than the absence of one.
+unknown=$(ctl give securitycraft:no_such_block 1 2>&1 || true)
+echo "unknown id reply: $unknown"
+echo "$unknown" | jq -e '.error' >/dev/null || fail "an unknown id was accepted: $unknown"
+
+# Saved contents survive a restart: the code is re-entered and the item is still there.
+ctl quit >/dev/null 2>&1 || true
+sleep 5
+launch SecurityCraftE2E
+ctl wait 20 >/dev/null
+line=$(cinfo "$BX" "$BY" "$BZ"); echo "barrel after the relaunch: $line"
+[ "$(field code "$line")" = set ] || fail "the relaunch lost the barrel's code: $line"
+container_cmd copen 4321 >/dev/null
+ctl look 180 0 >/dev/null
+ctl wait 2 >/dev/null
+ctl look-at block "$BX" "$BY" "$BZ" >/dev/null 2>&1 || true
+ctl interact "$BX" "$BY" "$BZ" >/dev/null || fail "the relaunched barrel did not open"
+ctl wait 6
+echo "relaunched screen: $(ctl screen | jq -r '.screen // "unknown"')"
+reloaded=$(ctl screen | jq -r '[.slots[]? | select(.slot == 300) | .item][0] // "empty"')
+reloaded_count=$(ctl screen | jq -r '[.slots[]? | select(.slot == 300) | .count][0] // 0')
+echo "barrel slot 300 after the relaunch: $reloaded x$reloaded_count"
+[ "$reloaded" = minecraft:iron_ingot ] && [ "$reloaded_count" = 8 ] \
+    || fail "the barrel lost its saved contents across the relaunch ($reloaded x$reloaded_count)"
+ctl close >/dev/null 2>&1 || true
+
+echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes did NOT rate-limit a correct one without the smart module; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke — and survived a level-side /setblock removal as a dropped item; a keypad without the module did not hurt a wrong code; and only the owner may set a keypad's first code — a stranger's click opened no set screen, a set screen that outlived an owner change stored nothing, the owner set it, and a stranger's /securitycraft code was refused; the allowlist module crafted from seven iron and two paper was installed on a coded keypad and an allowed click with nothing typed powered it and opened its door without a code screen, while swapping the player for a stranger restored the code screen and left the door closed; the denylist module crafted from seven iron, paper and an ink sac was installed on a coded keypad and a listed player's click opened nothing, powered nothing and left the door closed, while swapping the list to a stranger restored the code screen with the door still closed; the smart module crafted from seven iron, paper and an ender pearl was installed on a second coded keypad and five wrong codes then made the right one read status=6 with the keypad unpowered and the door closed, while the same five wrong codes on a keypad without the module still opened it; the disguise module crafted from seven iron, paper and a painting was installed on a fresh keypad and an --offscreen screenshot of that very keypad changed from its own texture to the fixed green tint (a parsed pixel difference, inverted by SELFTEST=disguise); and after quitting and relaunching the same world the code stored before the restart still opens the keypad and a wrong code is still refused; the passcode barrel saved its owner and code, a wrong code left it closed with no container slots (inverted by SELFTEST=container), the right code opened its 27 vanilla slots, eight ingots deposited there and survived a restart, an unknown id was refused, and an unprotected vanilla barrel opened without any code"
 # The cleanup trap prints the run's exit status as the last line.

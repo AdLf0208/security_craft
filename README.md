@@ -1,14 +1,15 @@
-# SecurityCraft (keypad, reinforced door, harming, allowlist, denylist and smart modules) — Horizon native mod
+# SecurityCraft (keypad, reinforced door, passcode barrel and the five modules) — Horizon native mod
 
 The SecurityCraft port for **Horizon**, as a flat SDK package: mod API **0.2**, built
 against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`.
 
 - **`horizon-mod.toml`** — the only manifest and the only identity
-  (`id = "securitycraft"`, `version = "0.2.8"`, `side = "both"`, `[native]` pins).
+  (`id = "securitycraft"`, `version = "0.2.10"`, `side = "both"`, `[native]` pins).
 - **`src/runtime.rs`** — the pure rules (code shape, salted digest, verdict, entry,
   mode, signal countdown, who may set a code or install a module, the allowlist's and
-  denylist's listed players, the wrong-code damage and the smart-module retry gate) and
+  denylist's listed players, the wrong-code damage, the smart-module retry gate and the
+  passcode container's owner-and-code access rule) and
   their tests. It also carries the
   port's **own SHA-256**, because the
   registry refuses a package that declares any dependency but the SDK
@@ -19,9 +20,10 @@ against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
   redstone, the owner gate on setting a code, the module install, the wrong-code
   damage, the denylist's "denied → no interaction" branch (before allow), the
   allowlist's "allowed → open without a code" branch, the smart module's gate on the retry
-  cooldown, the module drop and the harness commands.
-- **`src/lib.rs`** — the one `impl mod_api::Hooks`, the keypad's Parts and the key
-  panel item's Part (which records the owner).
+  cooldown, the passcode barrel's code-set/unlock/readout and one-shot open gate, the module
+  drop and the harness commands.
+- **`src/lib.rs`** — the one `impl mod_api::Hooks`, the keypad's and the passcode barrel's
+  Parts, and their items' Parts (which record the owner).
 - **`assets/`, `data/`** — the carried content: the `securitycraft:keypad` block and
   its `keypad_item`, the `securitycraft:iron_door_reinforced` block, the harming
   module (`securitycraft:harming_module`, its recipe and its
@@ -31,8 +33,9 @@ against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
   `blacklist_module`, III/IPI/ISI with an ink sac), the jar's
   blockstates, models,
   textures, loot, recipes, tag and lang, plus the smart module (securitycraft:smart_module,
-  carried as the jar's smart_module, III/IPI/ISI with an ender pearl), and the keypad's
-  content menu type.
+  carried as the jar's smart_module, III/IPI/ISI with an ender pearl), the keypad's
+  content menu type, and the passcode barrel (`securitycraft:keypad_barrel`, a carried
+  `minecraft:barrel` with 27 slots shown as the vanilla 9×3 menu).
 - **`securitycraft.hmod`** — the delivered package (built by
   `cargo horizon-mod build`, copied out of `target/`). Its only dependency is the SDK's
   `horizon-mod-api`, so it **packs no `Cargo.lock`**: R10 accepts a lock only as the
@@ -77,7 +80,8 @@ module's crafted recipe and its "denied → no interaction" branch, the smart mo
 gate on the retry cooldown (five wrong codes lock a keypad with the module but not
 one without it), and a quit-and-relaunch leg where the code stored before the restart still opens the keypad).
 `SELFTEST=1`, `SELFTEST=harming`, `SELFTEST=nonloot`, `SELFTEST=owner`, `SELFTEST=allow`,
-`SELFTEST=deny`, `SELFTEST=smart` and `SELFTEST=relaunch` prove the assertions can fail, and
+`SELFTEST=deny`, `SELFTEST=smart`, `SELFTEST=disguise` and `SELFTEST=container` prove the
+assertions can fail, and
 `GAME=$CONTROL_GAME` runs the same scenario on an unmodified game, which fails at the
 first mod id. The evidence is under `ports/_shared/evidence/securitycraft-e2e/`.
 

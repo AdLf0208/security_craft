@@ -1,6 +1,6 @@
 # Validation
 
-The current package is the flat SDK package (mod API 0.2) at version **0.2.9**, validated on
+The current package is the flat SDK package (mod API 0.2) at version **0.2.10**, validated on
 Linux with rustc 1.95.0 on 2026-11-24 against Horizon
 `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. All Rust steps ran through **forwarded**
@@ -9,6 +9,40 @@ relative `--port ports/securitycraft`); the launcher build and game legs stayed 
 remote box has no launcher, no prepared 26.3 resources and no renderer for this `--offscreen` e2e.
 `CARGO_INCREMENTAL=0` throughout; **no `BUILD_LOCAL=1`**. Evidence is under
 `../_shared/evidence/securitycraft/` and `../_shared/evidence/securitycraft-e2e/`.
+
+## Slice 9 — the passcode barrel (0.2.10)
+
+| Check | Result |
+|---|---|
+| Red (`container_access` stubbed) | 55 passed / 1 failed, `left: WrongCode right: Open` (`slice9-red.log`) |
+| `cargo test --offline` | **57 passed**, 0 failed (`slice9-test.log`, `sdk-test.log`) |
+| `cargo fmt --check` + `cargo clippy --all-targets --offline -- -D warnings` | Pass, 0 warnings (`slice9-fmt.log`, `slice9-clippy.log`) |
+| Two `cargo horizon-mod build`s + `cmp` | byte-identical (`slice9-build.log`), no `Cargo.lock` |
+| `cargo horizon-mod check securitycraft.hmod` | exit 0, `0.2.10 (native-mod, … for 26.3)`, sha `2829d08f…41841` (`slice9-check-fits.log`) |
+| `fits --build 0a875da` / `--build 0b14f8a` | `made for` / `fits`, same SHA (`slice9-check-fits.log`) |
+| Launcher build | `Compiling securitycraft (1 of 1)`, `native-0a875da-fa8e073dbac3 built` (`slice9-launcher-build.log`) |
+| `python3 ports/tools/verify-sdk-package.py securitycraft` | 1/1, `package matches the tree`, 57 tests, no lock (`slice9-verify-sdk-package.log`) |
+| In-game scenario (`tools/e2e.sh`, launcher-built game) | **PASS + `EXIT:0`**, all 19 phases incl. phase 19 (`securitycraft-e2e/e2e-launcher.log`) |
+| Control (unmodified Nightly) | `EXIT:1` at phase 1 (`e2e-control.log`) |
+| Ids-unknown control (`CONTROL=1`) | PASS + `EXIT:0`, both ids unknown (`e2e-ids-unknown.log`) |
+| `SELFTEST=container` | `EXIT:1`, "expected a wrong code to leave the barrel's contents unreadable" (`e2e-selftest-container.log`) |
+| Prior SELFTESTs (`1`, `harming`, `nonloot`, `owner`, `relaunch`, `allow`, `deny`, `smart`, `disguise`) | `EXIT:1` at each own assertion (`e2e-selftest*.log`) |
+| `check-e2e-logs.py securitycraft-e2e --strict` | `logs=16 ok=16`, exit 0 (`slice9-check-e2e-logs.log`) |
+| `check-recipe-types.py securitycraft` | `securitycraft: ok`, exit 0 |
+
+The delivered package is `securitycraft.hmod` **83,579 B**, SHA-256
+`2829d08f2d21a71db2e47381215d0d50f3fbdaba0c18ee29b632fa20e1d41841`, **78
+entries**, version **0.2.10**, SDK-only dependency set (R9) and no packed
+`Cargo.lock`. Phase 19 proves the carried `keypad_barrel`: the owner sets a code,
+a wrong code leaves it closed with no container slots, the right code opens its
+27-slot menu, eight ingots are read back in slot 300 and survive a relaunch, an
+unknown id is refused, and an unprotected vanilla barrel opens with no code.
+`SELFTEST=container` inverts the wrong-code assertion and fails exactly there.
+The pure `container_access` rule and the in-tree SHA-256 are unchanged by the
+other slices' assertions; deny-before-allow, the smart gate and the disguise
+render stay green in the same PASS leg.
+
+### Earlier verification (0.2.9 and previous)
 
 | Check | Result |
 |---|---|
