@@ -84,6 +84,7 @@
 #   SELFTEST=disguise tools/e2e.sh # phase 18 expects no green tint: exit 1
 #   SELFTEST=container tools/e2e.sh # phase 19 expects a locked barrel's slots: exit 1
 #   SELFTEST=furnace tools/e2e.sh  # phase 20 expects a wrong code to leave the furnace's slots: exit 1
+#   SELFTEST=smoker tools/e2e.sh   # phase 21 expects a wrong code to leave the smoker's slots: exit 1
 #   CONTROL=1 tools/e2e.sh     # no package at all: the ids must be unknown
 #   GAME=<an unmodified game> tools/e2e.sh   # the differential: the first phase fails
 #
@@ -813,7 +814,9 @@ block_name "$ALLOW_DOOR_X" 101 "$ALLOW_DOOR_Z" | grep -qx "$DOOR" || fail "no al
 ctl tp "$(( ALLOW_KEY_X + 1 )).5" 101 "$(( ALLOW_KEY_Z + 2 )).5" >/dev/null
 ctl wait 4
 ctl select securitycraft:keypad_item >/dev/null
-ctl place "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z" >/dev/null || fail "the allowlist keypad did not place"
+allow_place_reply=$(ctl place "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z" 2>&1 || true)
+echo "allowlist keypad place target=$ALLOW_KEY_X,$ALLOW_KEY_Y,$ALLOW_KEY_Z player=$(ctl state | jq -c '.player.position') held=$(ctl inventory | jq -c '[.slots[]? | select(.item == "securitycraft:keypad_item") | .slot]') reply=$allow_place_reply"
+echo "$allow_place_reply" | jq -e '.changed == true' >/dev/null || fail "the allowlist keypad did not place ($allow_place_reply)"
 ctl wait 4
 block_name "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z" | grep -qx "$KEYPAD" || fail "no allowlist keypad"
 code_cmd "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z" 1234
@@ -1478,7 +1481,159 @@ echo "furnace output slot 302 after the relaunch: $reloaded_furnace"
     || fail "the furnace lost its cooked output across the relaunch ($reloaded_furnace)"
 ctl close >/dev/null 2>&1 || true
 
+say "phase 21: the passcode smoker cooks only its smoking-table recipes, gated by its code"
+# The jar's keypad_smoker is carried as a minecraft:smoker template: the same three-slot
+# container as the furnace but matched against `minecraft:smoking`, not smelting. Its blockstate
+# is trimmed to 26.3's facing/lit; the open lid art is carried but unreferenced. The game's
+# smoking table has no raw-iron recipe (only food, cookingtime 200 here, output x1), so the
+# input/output are read from the artefact, not guessed from the furnace phase. The vanilla
+# smoker is the no-code differential and raw iron in the smoker is the recipe-kind differential.
+CURX=$(ctl state | jq -r '.player.position[0] | floor')
+CURZ=$(ctl state | jq -r '.player.position[2] | floor')
+SX=$((CURX+2)); SY=101; SZ=$((CURZ+2))
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl wait 2
+ctl give securitycraft:keypad_smoker 1 >/dev/null || fail "the game refused securitycraft:keypad_smoker: the package is not loaded"
+ctl give minecraft:smoker 1 >/dev/null || fail "the game refused a vanilla smoker"
+ctl give minecraft:beef 1 >/dev/null
+ctl give minecraft:raw_iron 1 >/dev/null
+ctl give minecraft:coal 2 >/dev/null
+ctl wait 6
+ctl close >/dev/null 2>&1 || true
+ctl wait 2 >/dev/null
+echo "smoker target $SX,$SY,$SZ; player: $(ctl state | jq -c '.player.position')"
+# Earlier phases left blocks around the spawn; clear just this one test spot so the
+# differential is a clean air block (a level-side removal, not a mod behaviour).
+ctl command "setblock $SX $SY $SZ minecraft:air" >/dev/null
+ctl wait 4
+echo "smoker spot before place: $(block_name "$SX" "$SY" "$SZ")"
+
+# Differential first: an unprotected vanilla smoker opens with no code and shows three slots.
+ctl select minecraft:smoker >/dev/null
+reply=$(ctl place "$SX" "$SY" "$SZ" 2>&1 || true)
+echo "vanilla smoker place reply: $reply"
+echo "$reply" | jq -e '.changed == true' >/dev/null || fail "the vanilla smoker did not place ($reply)"
+ctl wait 4
+ctl look 180 0 >/dev/null
+ctl wait 2 >/dev/null
+ctl look-at block "$SX" "$SY" "$SZ" >/dev/null 2>&1 || true
+ctl interact "$SX" "$SY" "$SZ" >/dev/null || fail "the vanilla smoker did not open"
+ctl wait 6
+vanilla_s_slots=$(ctl screen | jq '[.slots[]? | select(.slot >= 300)] | length')
+echo "unprotected vanilla smoker container slots: $vanilla_s_slots"
+[ "$vanilla_s_slots" = 3 ] || fail "the vanilla smoker showed $vanilla_s_slots slots, expected 3"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4
+ctl command "setblock $SX $SY $SZ minecraft:air" >/dev/null
+ctl wait 4
+
+ctl select securitycraft:keypad_smoker >/dev/null
+reply=$(ctl place "$SX" "$SY" "$SZ" 2>&1 || true)
+echo "passcode smoker place reply: $reply"
+echo "$reply" | jq -e '.changed == true' >/dev/null || fail "the passcode smoker did not place ($reply)"
+ctl wait 4
+echo "block after place: $(block_name "$SX" "$SY" "$SZ") / state $(block_state "$SX" "$SY" "$SZ")"
+block_name "$SX" "$SY" "$SZ" | grep -qx securitycraft:keypad_smoker || fail "no passcode smoker at $SX,$SY,$SZ"
+
+smoker_cmd() { ctl chat "/securitycraft $1 $SX $SY $SZ $2" 2>&1; ctl wait 4; }
+sinfo() { ctl chat "/securitycraft cinfo $1 $2 $3" >/dev/null; ctl wait 4; ctl messages 8 | jq -r '.chat[]' | grep -m1 '^securitycraft smoker ' || true; }
+
+reply=$(smoker_cmd cset 5679); echo "smoker code set reply: $(echo "$reply" | jq -r '.chat[0] // .error // .' 2>/dev/null)"
+line=$(sinfo "$SX" "$SY" "$SZ"); echo "coded smoker: $line"
+[ "$(field code "$line")" = set ] || fail "the smoker did not save its code: $line"
+[ "$(field open "$line")" = 0 ] || fail "a fresh coded smoker is already open: $line"
+[ "$(field owner "$line")" = set ] || fail "the smoker's placer is not its owner: $line"
+ctl command "clear @s" >/dev/null
+ctl wait 2
+
+# A wrong code writes no open permission: no menu, no slots.
+reply=$(smoker_cmd copen 9999); echo "wrong smoker code reply: $(echo "$reply" | jq -r '.chat[0] // .error // .' 2>/dev/null)"
+line=$(sinfo "$SX" "$SY" "$SZ"); echo "after a wrong smoker code: $line"
+[ "$(field open "$line")" = 0 ] || fail "a wrong code left the smoker open: $line"
+ctl tp "$((SX+1)).5" "$SY" "$((SZ+2)).5" >/dev/null
+ctl wait 4
+ctl look 180 0 >/dev/null
+ctl wait 2
+ctl look-at block "$SX" "$SY" "$SZ" >/dev/null 2>&1 || true
+ctl interact "$SX" "$SY" "$SZ" >/dev/null 2>&1 || true
+ctl wait 6
+smoker_locked_screen=$(ctl screen | jq -r '.screen // "unknown"')
+smoker_locked_slots=$(ctl screen | jq '[.slots[]? | select(.slot >= 300)] | length')
+echo "wrong-code smoker click: screen=$smoker_locked_screen container slots=$smoker_locked_slots"
+if [ "$SELFTEST" = smoker ]; then
+    [ "$smoker_locked_slots" -gt 0 ] || fail "SELFTEST: expected a wrong code to leave the smoker's contents unreadable"
+fi
+[ "$smoker_locked_screen" = playing ] || fail "a wrong code opened the smoker menu (screen=$smoker_locked_screen)"
+[ "$smoker_locked_slots" = 0 ] || fail "a wrong code exposed the smoker's $smoker_locked_slots container slots"
+ctl close >/dev/null 2>&1 || true
+
+# The right code grants the one-shot open; the block-backed menu shows three slots.
+reply=$(smoker_cmd copen 5679); echo "right smoker code reply: $(echo "$reply" | jq -r '.chat[0] // .error // .' 2>/dev/null)"
+line=$(sinfo "$SX" "$SY" "$SZ"); echo "after the right smoker code: $line"
+[ "$(field open "$line")" = 1 ] || fail "the right code did not grant the smoker open: $line"
+ctl look 180 0 >/dev/null
+ctl wait 2 >/dev/null
+ctl look-at block "$SX" "$SY" "$SZ" >/dev/null 2>&1 || true
+reply=$(ctl interact "$SX" "$SY" "$SZ" 2>&1 || true)
+echo "smoker unlocked interact: player=$(ctl state | jq -c '.player.position') reply=$reply"
+echo "$reply" | jq -e '.ok == true' >/dev/null || fail "the unlocked smoker did not open ($reply)"
+ctl wait 6
+smoker_slots=$(ctl screen | jq '[.slots[]? | select(.slot >= 300)] | length')
+echo "unlocked smoker container slots: $smoker_slots"
+[ "$smoker_slots" = 3 ] || fail "the unlocked smoker showed $smoker_slots slots, expected 3"
+
+# Recipe-kind differential: raw iron + coal does NOT cook in a smoker (the smoking table has
+# no iron recipe), so the output stays empty. This is what fails if the smoker used smelting.
+ctl command "item replace block $SX $SY $SZ container.0 with minecraft:raw_iron 1" >/dev/null
+ctl command "item replace block $SX $SY $SZ container.1 with minecraft:coal 1" >/dev/null
+ctl wait 80
+smoker_no_iron=$(ctl screen | jq -r '[.slots[]? | select(.slot == 302) | .item][0] // "empty"')
+echo "smoker output after raw iron + coal: $smoker_no_iron"
+[ "$smoker_no_iron" = empty ] || fail "the smoker cooked raw iron ($smoker_no_iron): it used the smelting table"
+
+# The artefact's smoking recipe for beef cooks one cooked_beef in 200 ticks; coal stays lit.
+ctl command "item replace block $SX $SY $SZ container.0 with minecraft:beef 1" >/dev/null
+ctl wait 260
+smoker_out=$(ctl screen | jq -r '[.slots[]? | select(.slot == 302) | .item][0] // "empty"')
+smoker_out_count=$(ctl screen | jq -r '[.slots[]? | select(.slot == 302) | .count][0] // 0')
+echo "smoker output slot 302: $smoker_out x$smoker_out_count"
+[ "$smoker_out" = minecraft:cooked_beef ] && [ "$smoker_out_count" = 1 ] \
+    || fail "the smoker did not smoke beef into one cooked beef ($smoker_out x$smoker_out_count)"
+smoker_state=$(block_state "$SX" "$SY" "$SZ")
+echo "smoker state while burning: $smoker_state"
+echo "$smoker_state" | grep -q 'lit=true' || fail "the smoker did not light while burning ($smoker_state)"
+smoker_input=$(ctl screen | jq -r '[.slots[]? | select(.slot == 300) | .item][0] // "empty"')
+echo "smoker input slot 300 after the cook: $smoker_input"
+[ "$smoker_input" = empty ] || fail "the cooked input was not consumed ($smoker_input)"
+line=$(sinfo "$SX" "$SY" "$SZ"); echo "smoker while open: $line"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4
+line=$(sinfo "$SX" "$SY" "$SZ"); echo "smoker after closing: $line"
+[ "$(field open "$line")" = 0 ] || fail "the smoker's one-shot open was not spent at close: $line"
+
+# A code and the cooked output survive a quit-and-relaunch.
+ctl quit >/dev/null 2>&1 || true
+sleep 5
+launch SecurityCraftE2E
+ctl wait 20 >/dev/null
+line=$(sinfo "$SX" "$SY" "$SZ"); echo "smoker after the relaunch: $line"
+[ "$(field code "$line")" = set ] || fail "the relaunch lost the smoker's code: $line"
+smoker_cmd copen 5679 >/dev/null
+ctl look 180 0 >/dev/null
+ctl wait 2 >/dev/null
+ctl look-at block "$SX" "$SY" "$SZ" >/dev/null 2>&1 || true
+ctl interact "$SX" "$SY" "$SZ" >/dev/null || fail "the relaunched smoker did not open"
+ctl wait 6
+reloaded_smoker=$(ctl screen | jq -r '[.slots[]? | select(.slot == 302) | .item][0] // "empty"')
+echo "smoker output slot 302 after the relaunch: $reloaded_smoker"
+[ "$reloaded_smoker" = minecraft:cooked_beef ] \
+    || fail "the smoker lost its cooked output across the relaunch ($reloaded_smoker)"
+ctl close >/dev/null 2>&1 || true
+
+echo "PASS-smoker: the passcode smoker saved its owner and code, a wrong code left no menu and no slots, the right code opened its three-slot block-backed menu, raw iron did not cook while beef smoked into one cooked_beef with the input consumed and lit=true, and the code and output survived a relaunch; an unprotected vanilla smoker opened with no code"
+
 echo "PASS-furnace: the passcode furnace saved its owner and code, a wrong code left no menu and no slots, the right code opened its three-slot block-backed menu, raw iron and coal cooked into one iron ingot with the input consumed and lit=true, and the code and output survived a relaunch; an unprotected vanilla furnace opened with no code"
 
-echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes did NOT rate-limit a correct one without the smart module; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke — and survived a level-side /setblock removal as a dropped item; a keypad without the module did not hurt a wrong code; and only the owner may set a keypad's first code — a stranger's click opened no set screen, a set screen that outlived an owner change stored nothing, the owner set it, and a stranger's /securitycraft code was refused; the allowlist module crafted from seven iron and two paper was installed on a coded keypad and an allowed click with nothing typed powered it and opened its door without a code screen, while swapping the player for a stranger restored the code screen and left the door closed; the denylist module crafted from seven iron, paper and an ink sac was installed on a coded keypad and a listed player's click opened nothing, powered nothing and left the door closed, while swapping the list to a stranger restored the code screen with the door still closed; the smart module crafted from seven iron, paper and an ender pearl was installed on a second coded keypad and five wrong codes then made the right one read status=6 with the keypad unpowered and the door closed, while the same five wrong codes on a keypad without the module still opened it; the disguise module crafted from seven iron, paper and a painting was installed on a fresh keypad and an --offscreen screenshot of that very keypad changed from its own texture to the fixed green tint (a parsed pixel difference, inverted by SELFTEST=disguise); and after quitting and relaunching the same world the code stored before the restart still opens the keypad and a wrong code is still refused; the passcode barrel saved its owner and code, a wrong code left it closed with no container slots (inverted by SELFTEST=container), the right code opened its 27 vanilla slots, eight ingots deposited there and survived a restart, an unknown id was refused, and an unprotected vanilla barrel opened without any code"
+echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes did NOT rate-limit a correct one without the smart module; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke — and survived a level-side /setblock removal as a dropped item; a keypad without the module did not hurt a wrong code; and only the owner may set a keypad's first code — a stranger's click opened no set screen, a set screen that outlived an owner change stored nothing, the owner set it, and a stranger's /securitycraft code was refused; the allowlist module crafted from seven iron and two paper was installed on a coded keypad and an allowed click with nothing typed powered it and opened its door without a code screen, while swapping the player for a stranger restored the code screen and left the door closed; the denylist module crafted from seven iron, paper and an ink sac was installed on a coded keypad and a listed player's click opened nothing, powered nothing and left the door closed, while swapping the list to a stranger restored the code screen with the door still closed; the smart module crafted from seven iron, paper and an ender pearl was installed on a second coded keypad and five wrong codes then made the right one read status=6 with the keypad unpowered and the door closed, while the same five wrong codes on a keypad without the module still opened it; the disguise module crafted from seven iron, paper and a painting was installed on a fresh keypad and an --offscreen screenshot of that very keypad changed from its own texture to the fixed green tint (a parsed pixel difference, inverted by SELFTEST=disguise); and after quitting and relaunching the same world the code stored before the restart still opens the keypad and a wrong code is still refused; the passcode barrel saved its owner and code, a wrong code left it closed with no container slots (inverted by SELFTEST=container), the right code opened its 27 vanilla slots, eight ingots deposited there and survived a restart, an unknown id was refused, and an unprotected vanilla barrel opened without any code; the passcode furnace cooked raw iron and coal into one iron ingot while an unprotected vanilla furnace opened with no code; the passcode smoker cooked beef into one cooked_beef with its code while raw iron did not cook and an unprotected vanilla smoker opened with no code"
 # The cleanup trap prints the run's exit status as the last line.

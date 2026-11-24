@@ -698,6 +698,27 @@ fn sha256_compress(state: &mut [u32; 8], block: &[u8]) {
 
 // --- the passcode furnace (slice 10) ---------------------------------------
 
+/// Which cooking table a passcode machine matches. Upstream's `FurnaceType`:
+/// a furnace smelts, a smoker smokes, a blast furnace blasts. The smoker's
+/// shorter cook time is a property of the recipes in that table, read from the
+/// game at tick time, not a multiplier applied here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CookKind {
+    Furnace,
+    Smoker,
+}
+
+impl CookKind {
+    /// The recipe type id whose table this cooker matches — the pin's
+    /// `FurnaceKind::recipe_type()`: a smoker smokes, a furnace smelts.
+    pub fn recipe_type(self) -> &'static str {
+        match self {
+            Self::Furnace => "minecraft:smelting",
+            Self::Smoker => "minecraft:smoking",
+        }
+    }
+}
+
 /// The passcode furnace's three slots: input, fuel and output.
 pub const FURNACE_INPUT: usize = 0;
 pub const FURNACE_FUEL: usize = 1;
@@ -799,6 +820,12 @@ mod tests {
     /// The salt the in-game path draws is 16 bytes; tests use a fixed one.
     const SALT: &str = "000102030405060708090a0b0c0d0e0f";
     const OTHER_SALT: &str = "ffeeddccbbaa99887766554433221100";
+
+    #[test]
+    fn a_smoker_cooks_against_the_smoking_recipe_table() {
+        assert_eq!(CookKind::Furnace.recipe_type(), "minecraft:smelting");
+        assert_eq!(CookKind::Smoker.recipe_type(), "minecraft:smoking");
+    }
 
     #[test]
     fn a_code_is_four_to_twenty_ascii_digits() {

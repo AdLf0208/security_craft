@@ -1,7 +1,7 @@
 # Validation
 
-The current package is the flat SDK package (mod API 0.2) at version **0.2.11** (the passcode
-furnace slice), validated on Linux with rustc 1.95.0 on 2026-11-24 against Horizon
+The current package is the flat SDK package (mod API 0.2) at version **0.2.12** (the passcode
+smoker slice), validated on Linux with rustc 1.95.0 on 2026-11-24 against Horizon
 `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. All Rust steps ran through **forwarded**
 `ports/tools/build-slot.sh` leases on `AdLf-PC` (`build-slot: forwarding … to the remote runner`,
@@ -9,6 +9,43 @@ relative `--port ports/securitycraft`); the launcher build and game legs stayed 
 remote box has no launcher, no prepared 26.3 resources and no renderer for this `--offscreen` e2e.
 `CARGO_INCREMENTAL=0` throughout; **no `BUILD_LOCAL=1`**. Evidence is under
 `../_shared/evidence/securitycraft/` and `../_shared/evidence/securitycraft-e2e/`.
+
+## Slice 12 — the passcode smoker (0.2.12)
+
+| Check | Result |
+|---|---|
+| Inventory gate (all 7 smoker models, 26.3 `facing`/`lit` names) | `CLEAN`; no renderer (`slice11-smoker-inventory.log`) |
+| Red (`CookKind::recipe_type` stubbed) | 59 passed / 1 failed — the new assertion read `left: "minecraft:smelting"` / `right: "minecraft:smoking"` (`slice11-red.log`) |
+| `cargo test --offline` | **61 passed**, 0 failed (`slice11-test-lint.log`, `sdk-test.log` regenerated for 0.2.12) |
+| `cargo fmt --check` + `cargo clippy --all-targets --offline -- -D warnings` | Pass, 0 warnings (`slice11-test-lint.log`) |
+| Two `cargo horizon-mod build`s + `cmp` | byte-identical, `rm -f Cargo.lock` before each (`slice11-build.log`) |
+| `cargo horizon-mod check securitycraft.hmod` | `0.2.12 (native-mod, … for 26.3)`, EXIT 0 (`slice11-check-fits.log`) |
+| `fits --build 0a875da` / `--build 0b14f8a` | `made for` / `fits`, delivered SHA in both (`slice11-check-fits.log`) |
+| `verify-sdk-package.py securitycraft` | 1/1, `package matches the tree`, 61 tests, no lock (`slice11-verify-sdk-package.log`) |
+| Launcher build | `Compiling securitycraft (1 of 1)`, `native-0a875da-75869b29741c built` (`slice11-launcher-build.log`) |
+| In-game scenario (`tools/e2e.sh`, launcher-built game) | **PASS + `EXIT:0`**, all 21 phases incl. phase 21 (`securitycraft-e2e/e2e-launcher.log`) |
+| Control (unmodified Nightly) | `EXIT:1` at phase 1 (`e2e-control.log`) |
+| Ids-unknown control (`CONTROL=1`) | PASS + `EXIT:0`, ids unknown (`e2e-ids-unknown.log`) |
+| `SELFTEST=smoker` | `EXIT:1` at phase 21 ("expected a wrong code to leave the smoker's contents unreadable") (`e2e-selftest-smoker.log`) |
+| Prior SELFTESTs (`1`/harming/nonloot/owner/relaunch/allow/deny/smart/disguise/container/furnace) | `EXIT:1` at each own assertion (`e2e-selftest*.log`) |
+| `check-e2e-logs.py securitycraft-e2e --strict` | `logs=22 ok=22`, exit 0 (`slice11-check-e2e-logs.log`) |
+| `check-recipe-types.py securitycraft` | `securitycraft: ok`, exit 0 (`slice11-check-recipe-types.log`) |
+
+The delivered package is `securitycraft.hmod` **100,774 B**, SHA-256
+`c71eefcf6df34528c2fedc5d9fd86fa15915b31339f0d3712a3a2274f11351d4`, **106 entries**, version
+**0.2.12**, SDK-only dependency set (R9) and no packed `Cargo.lock`. The launcher build printed
+`Compiling securitycraft (1 of 1)` after the manifest bump; `sdk-test.log` was regenerated on the
+final 0.2.12 tree (61 tests) before the last `verify-sdk-package.py` run, which reports
+`package matches the tree`.
+
+Phase 21 proves the carried `keypad_smoker`: an unprotected vanilla smoker opens without a code;
+a wrong `copen` leaves the passcode smoker closed with no slots; the right code opens its
+three-slot block-backed menu; **raw iron + coal leaves the output empty** (the smoking table has
+no iron recipe), while **beef + coal yields `minecraft:cooked_beef` ×1** with the input consumed
+and `lit=true`; and the code and output survive a relaunch. `SELFTEST=smoker` inverts the
+wrong-code assertion and fails exactly there. The brief's raw-iron assertion and 120-tick cook time
+were overridden from the artefact (nine food-only smoking recipes, all `cookingtime: 200`, output ×1)
+and recorded as deviations in `notes.md`.
 
 ## Slice 11 — the passcode furnace (0.2.11)
 

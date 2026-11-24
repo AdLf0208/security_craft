@@ -1,11 +1,11 @@
-# SecurityCraft (keypad, reinforced door, passcode barrel/furnace and the five modules) — Horizon native mod
+# SecurityCraft (keypad, reinforced door, passcode barrel/furnace/smoker and the five modules) — Horizon native mod
 
 The SecurityCraft port for **Horizon**, as a flat SDK package: mod API **0.2**, built
 against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`.
 
 - **`horizon-mod.toml`** — the only manifest and the only identity
-  (`id = "securitycraft"`, `version = "0.2.11"`, `side = "both"`, `[native]` pins).
+  (`id = "securitycraft"`, `version = "0.2.12"`, `side = "both"`, `[native]` pins).
 - **`src/runtime.rs`** — the pure rules (code shape, salted digest, verdict, entry,
   mode, signal countdown, who may set a code or install a module, the allowlist's and
   denylist's listed players, the wrong-code damage, the smart-module retry gate and the
@@ -21,10 +21,11 @@ against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
   damage, the denylist's "denied → no interaction" branch (before allow), the
   allowlist's "allowed → open without a code" branch, the smart module's gate on the retry
   cooldown, the passcode containers' code-set/unlock/readout and one-shot open gate, the
-  passcode furnace's smelting tick (fuel, cook time and `lit`, against the game's own recipe
-  table), the module drop and the harness commands.
-- **`src/lib.rs`** — the one `impl mod_api::Hooks`, the keypad's, the passcode barrel's and
-  the passcode furnace's Parts, and their items' Parts (which record the owner).
+  passcode furnace's smelting tick and the smoker's smoking tick (fuel, cook time and `lit`,
+  against the game's own recipe table), the module drop and the harness commands.
+- **`src/lib.rs`** — the one `impl mod_api::Hooks`, the keypad's, the passcode barrel's,
+  the passcode furnace's and the passcode smoker's Parts, and their items' Parts (which record
+  the owner).
 - **`assets/`, `data/`** — the carried content: the `securitycraft:keypad` block and
   its `keypad_item`, the `securitycraft:iron_door_reinforced` block, the harming
   module (`securitycraft:harming_module`, its recipe and its
@@ -36,9 +37,11 @@ against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
   textures, loot, recipes, tag and lang, plus the smart module (securitycraft:smart_module,
   carried as the jar's smart_module, III/IPI/ISI with an ender pearl), the keypad's
   content menu type, the passcode barrel (`securitycraft:keypad_barrel`, a carried
-  `minecraft:barrel` with 27 slots shown as the vanilla 9×3 menu), and the passcode furnace
+  `minecraft:barrel` with 27 slots shown as the vanilla 9×3 menu), the passcode furnace
   (`securitycraft:keypad_furnace`, a carried `minecraft:furnace` with the jar's blockstate,
-  models and five textures, trimmed to the 26.3 `facing`/`lit` states).
+  models and five textures, trimmed to the 26.3 `facing`/`lit` states), and the passcode
+  smoker (`securitycraft:keypad_smoker`, a carried `minecraft:smoker` with the jar's
+  `keypad_smoker_*` models and window texture, cooked against `minecraft:smoking`).
 - **`securitycraft.hmod`** — the delivered package (built by
   `cargo horizon-mod build`, copied out of `target/`). Its only dependency is the SDK's
   `horizon-mod-api`, so it **packs no `Cargo.lock`**: R10 accepts a lock only as the
@@ -81,13 +84,14 @@ harness-only `/securitycraft owner` — the allowlist module's crafted recipe, i
 "allowed → open without a code" branch (with a stranger differential), the denylist
 module's crafted recipe and its "denied → no interaction" branch, the smart module's
 gate on the retry cooldown (five wrong codes lock a keypad with the module but not
-one without it), the passcode barrel and furnace (wrong code → no menu or slots, right code → a
-block-backed container; raw iron and coal cook to one iron ingot with the input consumed and
-`lit=true`; code and contents survive a relaunch, against unprotected vanilla containers), and a
-quit-and-relaunch leg where the code stored before the restart still opens the keypad).
+one without it), the passcode barrel, furnace and smoker (wrong code → no menu or slots, right code → a
+block-backed container; the furnace cooks raw iron and coal to one iron ingot and the smoker cooks
+food against the smoking table, with the input consumed and `lit=true`; code and contents survive a
+relaunch, against unprotected vanilla containers), and a quit-and-relaunch leg where the code stored
+before the restart still opens the keypad).
 `SELFTEST=1`, `SELFTEST=harming`, `SELFTEST=nonloot`, `SELFTEST=owner`, `SELFTEST=allow`,
-`SELFTEST=deny`, `SELFTEST=smart`, `SELFTEST=disguise`, `SELFTEST=container` and
-`SELFTEST=furnace` prove the
+`SELFTEST=deny`, `SELFTEST=smart`, `SELFTEST=disguise`, `SELFTEST=container`,
+`SELFTEST=furnace` and `SELFTEST=smoker` prove the
 assertions can fail, and
 `GAME=$CONTROL_GAME` runs the same scenario on an unmodified game, which fails at the
 first mod id. The evidence is under `ports/_shared/evidence/securitycraft-e2e/`.

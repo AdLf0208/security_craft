@@ -252,6 +252,72 @@ impl BlockEntityPart for FurnaceEntity {
     }
 }
 
+/// The passcode smoker's block item: placing it records the placer as the owner.
+struct SmokerItem;
+
+#[mod_api::horizon_part]
+impl ItemPart for SmokerItem {
+    fn on_block_placed_by(&self, host: &mut dyn ServerHost, event: &mut OnBlockPlacedByEvent<'_>) {
+        support::on_block_placed_by(host, event);
+    }
+}
+
+/// The passcode smoker's block: the same one-shot open gate as the furnace.
+struct SmokerBlock;
+
+#[mod_api::horizon_part]
+impl BlockPart for SmokerBlock {
+    fn use_item_on(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut UseItemOnEvent<'_>,
+    ) -> Option<InteractionResult> {
+        support::on_smoker_use(host, event.click)
+    }
+
+    fn use_without_item(
+        &self,
+        host: &mut dyn ServerHost,
+        event: &mut UseWithoutItemEvent<'_>,
+    ) -> Option<InteractionResult> {
+        support::on_smoker_use(host, event.click)
+    }
+}
+
+/// The passcode smoker's block entity: saved owner/code, the four cook timing ints and the
+/// three input/fuel/output slots, ticked against the game's `minecraft:smoking` recipes.
+struct SmokerEntity;
+
+#[mod_api::horizon_part]
+impl BlockPart for SmokerEntity {}
+
+#[mod_api::horizon_part]
+impl BlockEntityPart for SmokerEntity {
+    fn block_entity(
+        &self,
+        _level: LevelSide<'_>,
+        _event: &mut BlockEntityEvent<'_>,
+    ) -> Option<mod_api::Compound> {
+        support::on_block_entity()
+    }
+
+    fn block_entity_ticks(&self, _host: &dyn mod_api::Host, event: &mut BlockEntityTicksEvent<'_>) {
+        support::on_ticks(event);
+    }
+
+    fn block_entity_tick(&self, host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
+        support::on_smoker_tick(host, event);
+    }
+
+    fn screen(
+        &self,
+        _host: &dyn mod_api::Host,
+        _event: &mut mod_api::ScreenEvent<'_>,
+    ) -> Option<Screen> {
+        Some(support::smoker_screen())
+    }
+}
+
 /// The passcode barrel's block entity: the code, the salt and the open gate, with the game
 /// backing its 27 item slots. A separate type from the block Part — one Part type per block.
 struct ContainerEntity;
@@ -345,6 +411,23 @@ impl Hooks for Mod {
         r.block_container(&furnace, support::furnace_container());
         let furnace_item = r.item_key(support::FURNACE);
         r.item_part(furnace_item, FurnaceItem);
+        // The passcode smoker: its own block entity and three-slot container, cooked against
+        // the game's smoking table on every tick (the furnace's sibling in the jar).
+        let smoker = r.block_key(support::SMOKER);
+        let smoker_kind = r
+            .block_entity_type(support::SMOKER_ENTITY)
+            .blocks(&[support::SMOKER])
+            .build();
+        if let Err(error) = r.block_entity_part(&smoker_kind, SmokerEntity) {
+            cx.refuse(&format!(
+                "securitycraft: the passcode smoker part was refused: {error}"
+            ));
+            return;
+        }
+        r.block_part(smoker, SmokerBlock);
+        r.block_container(&smoker, support::smoker_container());
+        let smoker_item = r.item_key(support::SMOKER);
+        r.item_part(smoker_item, SmokerItem);
         // A removal hook only has a `LevelHost`, which cannot resolve an id, so the
         // keys of all four droppable modules are stored once here.
         let harming_module = r.item_key(support::HARMING_MODULE);
@@ -421,6 +504,10 @@ impl Hooks for Mod {
             && let Some(pos) = event.pos
         {
             support::on_furnace_container_closed(host, event.player, event.dimension, pos);
+        } else if event.menu == support::SMOKER_MENU
+            && let Some(pos) = event.pos
+        {
+            support::on_smoker_container_closed(host, event.player, event.dimension, pos);
         }
     }
 

@@ -2548,3 +2548,214 @@ smoker model turns out to need a renderer, stop with `blocked(<symbol>)` instead
 The **keypad door and trapdoor**, the universal block modifier and the reinforced-block family
 stay behind the smoker; the chest remains `blocked(register_block_entity_renderers)` until the pin
 stamps a block-entity renderer surface.
+
+## Slice 12 — the passcode smoker (2026-11-24, SDK `0a875da`) — 0.2.12
+
+**Slice and gap line.** The brief's own line, from slice 11's `## Next slice` and the port's gap
+list: *"the passcode chest/barrel/**furnace/smoker**, keypad door and trapdoor"*. The chest stays
+`blocked(register_block_entity_renderers)` (slice 10, measured — `builtin/entity` plus two Java
+renderers, no pin surface); this slice takes the **passcode smoker**
+(`securitycraft:keypad_smoker`). Class **content**, tier **deep** in the ledger; the delivered
+shape is the port's existing **logic + machines** half (saved owner/code, a three-slot
+block-backed container, a one-shot code gate, a cook tick) plus one carried block — no renderer,
+no new hook kind, no re-tiering. The furnace/smoker gap line is now closed.
+
+### Inventory gate first (the brief's stop condition)
+
+From the jar (`securitycraft-1.10.2.1.jar`, SHA-1 `8760079e…3251`), every smoker block and item
+model was scanned for `builtin/entity`: all **seven** were `CLEAN` —
+`keypad_smoker_{closed,closed_lit,open,open_lit}`, `keypad_smoker` (item), and the two
+`smoker_mine` models (evidence: `slice10-furnace-inventory.log` extended by this slice's
+`slice11-smoker-inventory.log`). The visible machine is a static JSON mesh: the four
+`keypad_smoker_*` block models parent the already-carried
+`base_keypad_furnace_{closed,open}` meshes and set `#furnace` to the vanilla
+`block/smoker_front{,_on}` and `#window` to the jar's `keypad_smoker_window.png`
+(365 B, SHA-256 `7baa43e86255cb1786070ac59dbf8d282db05ad9cfab03bde5a460c7e272cf32`,
+extracted byte-for-byte). Both vanilla smoker-front textures are present in the prepared 26.3
+root. **No renderer is needed**, so the brief's `blocked(<symbol>)` stop condition does not fire.
+
+The jar's 16-variant blockstate (`facing` × `lit` × `open`) is trimmed to 26.3's **eight**
+`facing` × `lit` variants: the prepared `assets/minecraft/blockstates/smoker.json` has exactly
+`facing` and `lit`, no `open`. The open-lid models are carried but unreferenced, as for the
+furnace (recorded as a deviation).
+
+### Cook time and output — read from the artefact, not the brief
+
+The brief proposed `raw_iron` + coal → `iron_ingot` and a 120-tick cook. The artefact disagrees,
+and the artefact wins:
+
+- `FurnaceKind::Smoker::recipe_type()` is **`minecraft:smoking`** (read from the pin's
+  `horizon-client-render/src/containers.rs:71`), and `Recipes::cook` filters strictly by recipe
+  type — there is no smelting fallback.
+- The pack's **nine** `minecraft:smoking` recipes are all food (potato, beef, cod, chicken,
+  mutton, rabbit, porkchop, salmon, kelp); each has `cookingtime: 200` and one output item.
+  **There is no `iron_ingot_from_smoking` recipe** — raw iron can only be smelted or blasted.
+  A real vanilla smoker cannot cook raw iron either, so the brief's proposed assertion cannot be
+  faithful.
+- The e2e therefore proves the recipe kind with a pair: `raw_iron` + coal leaves the output
+  **empty** (the smoker is not using `minecraft:smelting`), then `minecraft:beef` + coal yields
+  **`minecraft:cooked_beef` ×1** after 200 ticks with `lit=true` and the input consumed. Both
+  the cook time and the output count come from the game data, not the brief. `SELFTEST=smoker`
+  inverts the wrong-code/no-slots assertion and ends `EXIT:1`.
+
+### Red proof (TDD, before the rule existed)
+
+`src/runtime.rs` gained `CookKind { Furnace, Smoker }` with `recipe_type` stubbed to
+`minecraft:smelting` for both arms, and `a_smoker_cooks_against_the_smoking_recipe_table` was
+added first. A forwarded `cargo test --offline` (`slice11-red.log`) failed:
+
+```
+---- runtime::tests::a_smoker_cooks_against_the_smoking_recipe_table stdout ----
+
+thread 'runtime::tests::a_smoker_cooks_against_the_smoking_recipe_table' panicked at src/runtime.rs:826:9:
+assertion `left == right` failed
+  left: "minecraft:smelting"
+ right: "minecraft:smoking"
+
+test result: FAILED. 59 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+The rule became `Furnace → minecraft:smelting`, `Smoker → minecraft:smoking`; the pure
+`furnace_tick`, `FurnaceState` and `container_access` rules are reused unchanged. A glue test
+`the_smoker_container_uses_a_three_slot_mod_menu` pins the new menu, giving **61** tests.
+
+### What the slice implements
+
+- **The rule** (`runtime::CookKind::recipe_type`): the only genuinely new pure rule — a smoker
+  matches the smoking table. The burn/cook/consume/smelt timer and the owner-then-digest access
+  verdict are the 0.2.11 rules, byte-shared with the furnace.
+- **The glue** (`support.rs`): `cooking(host, level, stack, CookKind)` caches one `Identifier` per
+  recipe type and calls `LevelRef::recipe_for`; `on_cooker_tick` is the shared tick and
+  `on_furnace_tick`/`on_smoker_tick` pass the kind. The one-shot open gate, harness commands and
+  menu-close spending are the barrel/furnace paths, with `cset`/`copen`/`cinfo` now labelling
+  `securitycraft smoker …` by block id.
+- **Content**: `securitycraft:keypad_smoker` (the jar's block/item ids, eight-state blockstate,
+  four block models + item model, the window texture, simplified loot, lang and creative-tab
+  entry, pickaxe tag), a three-slot `securitycraft:keypad_smoker` menu and a drawn input/fuel/
+  output panel.
+- **Parts** (`lib.rs`): `SmokerItem` records the placer as owner, `SmokerBlock` gates the click,
+  `SmokerEntity` owns the block entity, tick and screen; registered as its own block-entity type.
+
+### Verification (0.2.12, SDK `0a875da`, 2026-11-24)
+
+Every Rust step ran through **forwarded** `build-slot.sh` leases on `AdLf-PC`
+(`build-slot: forwarding … to the remote runner`, relative `--port ports/securitycraft`,
+`CARGO_INCREMENTAL=0`, **no `BUILD_LOCAL=1`**); the launcher build and the game legs stayed local
+(the e2e is `--offscreen`). Evidence under `../_shared/evidence/securitycraft/` and
+`../_shared/evidence/securitycraft-e2e/`.
+
+| Check | Evidence | Result |
+|---|---|---|
+| Inventory gate | `slice11-smoker-inventory.log` | seven smoker models `CLEAN`; 26.3 smoker = `facing` × `lit` |
+| Red | `slice11-red.log` | **59 passed / 1 failed**, `left: "minecraft:smelting"` / `right: "minecraft:smoking"` |
+| Tests | `slice11-test-lint.log`, `sdk-test.log` (regenerated for 0.2.12) | **61 passed**, 0 failed |
+| Format + lints | `slice11-test-lint.log` | fmt clean, clippy exit 0, **0 warnings** |
+| Two builds + `cmp` | `slice11-build.log` | **byte-identical**; `rm -f Cargo.lock` before each |
+| Delivered | `securitycraft.hmod` | **100,774 B**, SHA-256 `c71eefcf6df34528c2fedc5d9fd86fa15915b31339f0d3712a3a2274f11351d4`, **106 entries**, no `Cargo.lock`, version 0.2.12 |
+| Registry check | `slice11-check-fits.log` | `securitycraft 0.2.12 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, same SHA, EXIT 0 |
+| `fits --build 0a875da` | `slice11-check-fits.log` | `0a875da  made for`, EXIT 0 |
+| `fits --build 0b14f8a` | `slice11-check-fits.log` | `0b14f8a  fits`, EXIT 0, same SHA |
+| Gate | `slice11-verify-sdk-package.log` | **1/1**, `package matches the tree`, SDK-only deps, no lock, 61 tests |
+| Launcher build | `slice11-launcher-build.log` | `Compiling securitycraft (1 of 1)`, `native-0a875da-75869b29741c built` |
+| In-game PASS | `securitycraft-e2e/e2e-launcher.log` | **PASS + `EXIT:0`**, all 21 phases incl. phase 21 |
+| Control (unmodified Nightly) | `e2e-control.log` | **`EXIT:1`** at phase 1 |
+| Ids-unknown control | `e2e-ids-unknown.log` | PASS + `EXIT:0`, both ids unknown |
+| SELFTEST (smoker) | `e2e-selftest-smoker.log` | **`EXIT:1`** at phase 21, "expected a wrong code to leave the smoker's contents unreadable" |
+| Prior SELFTESTs (`1`/harming/nonloot/owner/relaunch/allow/deny/smart/disguise/container/furnace) | `e2e-selftest*.log` | **`EXIT:1`** at each own assertion |
+| Log checker | `slice11-check-e2e-logs.log` | `logs=22 ok=22`, exit 0 |
+| Recipe types | `slice11-check-recipe-types.log` | `securitycraft: ok`, exit 0 |
+
+Phase 21 in the PASS leg (`e2e-launcher.log`):
+
+```
+unprotected vanilla smoker container slots: 3
+coded smoker: securitycraft smoker 22 101 8 code=set open=0 owner=set lit=false
+wrong-code smoker click: screen=playing container slots=0
+after the right smoker code: securitycraft smoker 22 101 8 code=set open=1 owner=set lit=false
+unlocked smoker container slots: 3
+smoker output after raw iron + coal: empty
+smoker output slot 302: minecraft:cooked_beef x1
+smoker state while burning: securitycraft:keypad_smoker[facing=west,lit=true]
+smoker input slot 300 after the cook: empty
+smoker output slot 302 after the relaunch: minecraft:cooked_beef
+```
+
+The wrong-code pair (0 slots, `screen=playing`) is fail-capable: `SELFTEST=smoker` inverts it and
+fails at `EXIT:1`. The vanilla smoker at the same spot opens with no code (differential), and the
+raw-iron no-output is the recipe-kind differential that would fail if the smoker used smelting.
+`ctl messages` stays at **8** throughout. Three pre-existing placement flakes stopped intermediate
+legs before their own assertions (phase 14 twice, phase 17 twice); each identical leg was retried
+unchanged and the flake logs are kept (`e2e-smoker-first-attempt-flake.log`,
+`e2e-smoker-flake-17.log`, `e2e-smoker-selftest-flake-17.log`,
+`e2e-furnace-selftest-flake-14.log`) — none is called green. A transient `ctl place` reach/occupancy
+problem in the new phase was diagnosed: the target was 3.5 blocks from the player and held a
+reinforced door from an earlier phase; phase 21 now clears its own spot and places within reach.
+
+### Coverage added by this slice
+
+| Family | Status |
+|---|---|
+| `securitycraft:keypad_smoker` block/item (give, place, read back) | **tested** — phase 21: `block_name` and `block_state` |
+| owner recorded on placement; first code saved | **tested** — phase 21: `owner=set`, `code=set` |
+| wrong code → no permission, no menu, no slots | **tested** — phase 21: `open=0`, `screen=playing`, 0 slots; inverted by `SELFTEST=smoker` |
+| right code → three-slot block-backed menu | **tested** — phase 21: `screen=container`, 3 slots |
+| `minecraft:smoking` recipe kind (raw iron does not cook) | **tested** — phase 21: output stays `empty` |
+| cook time and output count from the artefact (beef → cooked_beef ×1, 200 ticks) | **tested** — phase 21: slot 302 `minecraft:cooked_beef x1`, `lit=true`, input consumed |
+| saved output and code survive a relaunch | **tested** — phase 21: slot 302 still cooked_beef after restart |
+| unprotected vanilla smoker (differential) | **tested** — phase 21: 3 slots, no code |
+| the smoker recipe-kind rule | **unit test** `a_smoker_cooks_against_the_smoking_recipe_table` |
+| the three-slot smoker menu | **unit test** `the_smoker_container_uses_a_three_slot_mod_menu` |
+| keypad chest / keypad door / trapdoor, universal block modifier, reinforced-block family | **not ported** — remaining gap list |
+| the smoker's lid-open blockstate property | **not ported** — 26.3's smoker has only `facing`/`lit` (deviation) |
+| modules installed on a smoker | **not ported** — modules install on keypads only |
+
+### Deviations recorded by this slice
+
+1. **The in-game cook uses a food recipe, not the brief's `raw_iron → iron_ingot`.** The pack's
+   `minecraft:smoking` table is food-only (nine recipes, all `cookingtime: 200`, output ×1); raw
+   iron has no smoking recipe in the artefact, so asserting iron would be unfaithful and would
+   also fail on a vanilla smoker. The phase proves the recipe kind with raw iron's *no output*
+   and the faithful output with beef. This is an artefact-over-brief ruling, recorded here.
+2. **`open` blockstate property trimmed.** 26.3's smoker has only `facing` and `lit`; the jar's
+   `base_keypad_furnace_open` models are carried but unreferenced. The menu opening is the
+   observable "open".
+3. **The loot table is simplified** to a survives-explosion drop of the smoker item, without the
+   jar's `copy_components(custom_name)` transfer (as the barrel and furnace were).
+4. **The code check is a harness command** (`cset`/`copen`/`cinfo`), not a drawn second screen, as
+   for every other passcode family in this port.
+5. **No faster cook multiplier.** The port's cook rule uses the matched recipe's `processing_time`
+   unchanged; this pack's smoking recipes are all 200 ticks, so the smoker cooks at the same rate
+   as the furnace here (the brief's "shorter cook time" is the vanilla 1.21.1 convention, not this
+   pack's data). Recorded rather than applied as a made-up multiplier.
+
+### Changelog for the resubmission (0.2.12)
+
+> Supersedes #1805→0.2.11 (the staged PR). Carries the jar's `keypad_smoker` as a second cook-time
+> machine beside the furnace: the same saved owner/code, three-slot container and one-shot code gate,
+> ticked against the game's `minecraft:smoking` table via a new pure `CookKind::recipe_type` rule.
+> The brief's raw-iron assertion was replaced from the artefact — the smoking table is food-only —
+> and the in-game leg proves both that raw iron does not cook and that beef smokes into one
+> cooked_beef with the input consumed and `lit=true`, surviving a relaunch. The salted SHA-256,
+> SDK-only dependency set, save format, deny-before-allow order, smart gate and disguise render are
+> unchanged.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-review, rust-port
+
+## Next slice
+
+**Family:** the **keypad door and trapdoor** (`securitycraft:keypad_door`,
+`securitycraft:keypad_trapdoor`), the next line of the gap list
+(*"the passcode chest/barrel/furnace/smoker, **keypad door and trapdoor**"*) now that the
+furnace/smoker pair is closed. It fits tier **deep** in the same logic+machines shape: a
+passcode gate in front of a carried `minecraft:iron_door`/`minecraft:iron_trapdoor` template, the
+same owner-and-code access rule, the same harness commands and the jar's blockstates/models.
+Before dispatch, the next agent must inventory the door/trapdoor models for `builtin/entity`
+and confirm the 26.3 door/trapdoor property names (`facing`, `half`, `hinge`, `open`, `powered`)
+against the jar's variants, stopping with `blocked(<symbol>)` if a renderer is needed.
+
+**In-game assertion that would prove it:** place a passcode door beside a keypad, set its code as
+owner with `cset`, confirm a wrong `copen` leaves the door `open=false` and a right one flips it to
+`open=true`; a vanilla iron door beside the player opens on redstone with no code (differential);
+`SELFTEST=keypad-door` must invert the wrong-code/closed assertion and end `EXIT:1`. The
+universal block modifier and the reinforced-block family stay behind it; the chest remains
+`blocked(register_block_entity_renderers)`.

@@ -32,11 +32,11 @@ use mod_api::{
 };
 
 use crate::runtime::{
-    Action, Button, DEFAULT_SIGNAL_TICKS, Entry, FURNACE_FUEL, FURNACE_INPUT, FURNACE_OUTPUT,
-    FURNACE_SLOTS, FurnaceState, FurnaceTick, ListData, Mode, Throttle, after_submit, button,
-    container_access, cooldown_allows, cooldown_failed, disguise_tint, facing_from_yaw,
-    furnace_access, furnace_tick, hash_code, is_allowed, is_denied, may_install, may_set_code,
-    new_salt, tick_signal, valid_code, wrong_code_damage,
+    Action, Button, CookKind, DEFAULT_SIGNAL_TICKS, Entry, FURNACE_FUEL, FURNACE_INPUT,
+    FURNACE_OUTPUT, FURNACE_SLOTS, FurnaceState, FurnaceTick, ListData, Mode, Throttle,
+    after_submit, button, container_access, cooldown_allows, cooldown_failed, disguise_tint,
+    facing_from_yaw, furnace_access, furnace_tick, hash_code, is_allowed, is_denied, may_install,
+    may_set_code, new_salt, tick_signal, valid_code, wrong_code_damage,
 };
 
 /// The keypad block; its item (`securitycraft:keypad_item`) places it.
@@ -55,6 +55,13 @@ pub(crate) const FURNACE: &str = "securitycraft:keypad_furnace";
 pub(crate) const FURNACE_ENTITY: &str = "keypad_furnace";
 /// The furnace's three-slot content menu.
 pub(crate) const FURNACE_MENU: &str = "securitycraft:keypad_furnace";
+/// The passcode smoker (`securitycraft:keypad_smoker`), carried as a `minecraft:smoker`
+/// template with the same three slots but the game's `minecraft:smoking` recipe table.
+pub(crate) const SMOKER: &str = "securitycraft:keypad_smoker";
+/// The block entity type of the passcode smoker.
+pub(crate) const SMOKER_ENTITY: &str = "keypad_smoker";
+/// The smoker's three-slot content menu.
+pub(crate) const SMOKER_MENU: &str = "securitycraft:keypad_smoker";
 /// The vanilla 9×3 menu the barrel's 27 slots open, so hoppers, comparators,
 /// shift-clicks and a relaunch use the game's own container paths.
 pub(crate) const CONTAINER_MENU: &str = "securitycraft:keypad_barrel";
@@ -1421,6 +1428,14 @@ pub(crate) fn on_furnace_use(
     on_container_use(host, click)
 }
 
+/// A right click on the passcode smoker uses the same one-shot gate as the furnace.
+pub(crate) fn on_smoker_use(
+    host: &mut dyn ServerHost,
+    click: &mod_api::BlockClick<'_>,
+) -> Option<InteractionResult> {
+    on_container_use(host, click)
+}
+
 /// The barrel's menu closed: spend the one-shot permission so a later right-click
 /// needs another code check (upstream closes and re-locks the container).
 pub(crate) fn on_barrel_container_closed(
@@ -1453,11 +1468,22 @@ pub(crate) fn on_furnace_container_closed(
     on_barrel_container_closed(host, player, dimension, pos);
 }
 
+/// The smoker's menu closed: spend its one-shot open permission as the furnace does.
+pub(crate) fn on_smoker_container_closed(
+    host: &mut dyn ServerHost,
+    player: u128,
+    dimension: &str,
+    pos: [i32; 3],
+) {
+    on_barrel_container_closed(host, player, dimension, pos);
+}
+
 /// The label a harness command uses for a passcode container's id.
 fn passcode_label(block: &str) -> Option<&'static str> {
     match block {
         CONTAINER => Some("barrel"),
         FURNACE => Some("furnace"),
+        SMOKER => Some("smoker"),
         _ => None,
     }
 }
@@ -1523,7 +1549,7 @@ fn unlock_container(
         .ok_or_else(|| format!("No passcode {label} at that position."))?;
     let stored = string(&data, KEY_CODE);
     let salt = string(&data, KEY_SALT).unwrap_or_default();
-    if block == FURNACE {
+    if block == FURNACE || block == SMOKER {
         if !furnace_access(
             owner_of(&data),
             asking.unwrap_or(0),
@@ -1631,6 +1657,24 @@ pub(crate) fn furnace_container() -> ModContainer {
     }
 }
 
+/// The smoker's screen: the same three input/fuel/output slots as the furnace.
+pub(crate) fn smoker_screen() -> Screen {
+    furnace_screen()
+}
+
+/// The smoker's container: input, fuel and output, with its own content menu so
+/// hoppers and a relaunch use the game's own block-backed container paths.
+pub(crate) fn smoker_container() -> ModContainer {
+    let all = vec![FURNACE_INPUT, FURNACE_FUEL, FURNACE_OUTPUT];
+    ModContainer {
+        slots: FURNACE_SLOTS,
+        faces: std::array::from_fn(|_| all.clone()),
+        inputs: vec![FURNACE_INPUT, FURNACE_FUEL],
+        outputs: vec![FURNACE_OUTPUT],
+        menu: Some(SMOKER_MENU.to_owned()),
+    }
+}
+
 /// The saved furnace timing keys, named after `AbstractFurnaceBlockEntity`'s int fields.
 const FURNACE_BURN: &str = "furnace_burn";
 const FURNACE_BURN_TOTAL: &str = "furnace_burn_total";
@@ -1653,14 +1697,27 @@ fn write_furnace_state(nbt: &mut Compound, state: FurnaceState) {
     set_int(nbt, FURNACE_COOK_TOTAL, state.total);
 }
 
-/// The game's own smelting recipe for one input stack (a data pack's recipe included).
-fn smelting(host: &dyn Host, level: LevelRef, stack: &ItemStack) -> Option<RecipeMatch> {
+/// The game's own cooking recipe for one input stack in the machine's table (a
+/// data pack's recipe included). A smoker matches `minecraft:smoking`; a furnace
+/// matches `minecraft:smelting`. The cook time and output are the recipe's own,
+/// never a multiplier applied by this port.
+fn cooking(
+    host: &dyn Host,
+    level: LevelRef,
+    stack: &ItemStack,
+    kind: CookKind,
+) -> Option<RecipeMatch> {
     static SMELTING: OnceLock<Option<Identifier>> = OnceLock::new();
-    let kind = SMELTING
-        .get_or_init(|| Identifier::parse("minecraft:smelting").ok())
+    static SMOKING: OnceLock<Option<Identifier>> = OnceLock::new();
+    let cache = match kind {
+        CookKind::Furnace => &SMELTING,
+        CookKind::Smoker => &SMOKING,
+    };
+    let recipe_type = cache
+        .get_or_init(|| Identifier::parse(kind.recipe_type()).ok())
         .as_ref()?;
     level
-        .recipe_for(host, kind, &RecipeInput::Single(stack.clone()))
+        .recipe_for(host, recipe_type, &RecipeInput::Single(stack.clone()))
         .ok()
         .flatten()
 }
@@ -1704,10 +1761,10 @@ fn smelt_furnace_item(items: &mut [Option<ItemStack>], result: &ItemStack) {
     }
 }
 
-/// One server tick of the passcode furnace: cook against the game's smelting table, burn the fuel
+/// One server tick of a passcode cooker: match the machine's own recipe table, burn the fuel
 /// slot, write the four saved timing ints and follow `lit` with `isBurning`. The code gate is the
-/// open permission; once the menu is open the machine runs exactly as upstream's furnace does.
-pub(crate) fn on_furnace_tick(host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
+/// open permission; once the menu is open the machine runs as upstream's cooker does.
+fn on_cooker_tick(host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>, kind: CookKind) {
     let pos = event.pos;
     let Some(level) = in_place_level(host) else {
         return;
@@ -1723,7 +1780,7 @@ pub(crate) fn on_furnace_tick(host: &mut dyn ServerHost, event: &mut BlockEntity
         .items
         .get(FURNACE_INPUT)
         .and_then(|slot| slot.as_ref())
-        .and_then(|stack| smelting(&*host, level, stack));
+        .and_then(|stack| cooking(&*host, level, stack, kind));
     let recipe_time = recipe.as_ref().map(|matched| matched.processing_time);
     let result = recipe.as_ref().map(|matched| matched.output.clone());
     let stored = event
@@ -1782,6 +1839,17 @@ pub(crate) fn on_furnace_tick(host: &mut dyn ServerHost, event: &mut BlockEntity
         "lit",
         if state.is_burning() { "true" } else { "false" },
     );
+}
+
+/// The furnace cooks against `minecraft:smelting`.
+pub(crate) fn on_furnace_tick(host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
+    on_cooker_tick(host, event, CookKind::Furnace);
+}
+
+/// The smoker cooks against `minecraft:smoking`, whose recipes have their own
+/// (shorter, in vanilla) cook time and output count.
+pub(crate) fn on_smoker_tick(host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
+    on_cooker_tick(host, event, CookKind::Smoker);
 }
 
 /// The UUID `/securitycraft owner … stranger` writes: no player has it, so the
@@ -2349,6 +2417,23 @@ mod tests {
         );
         assert_eq!(container.inputs.len(), 27);
         assert_eq!(container.outputs.len(), 27);
+    }
+
+    #[test]
+    fn the_smoker_container_uses_a_three_slot_mod_menu() {
+        let container = smoker_container();
+        assert_eq!(container.slots, 3, "input, fuel and output");
+        assert_eq!(
+            container.menu.as_deref(),
+            Some(SMOKER_MENU),
+            "the carried smoker opens through its own three-slot content menu"
+        );
+        assert_eq!(container.inputs, vec![FURNACE_INPUT, FURNACE_FUEL]);
+        assert_eq!(container.outputs, vec![FURNACE_OUTPUT]);
+        assert!(
+            container.faces.iter().all(|face| face.len() == 3),
+            "every face reaches the three slots, as a vanilla smoker does"
+        );
     }
 
     #[test]
