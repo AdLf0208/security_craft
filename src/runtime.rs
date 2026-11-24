@@ -160,6 +160,18 @@ pub fn is_allowed(installed: bool, data: &ListData, player: &str) -> bool {
     installed && (data.affects_everyone() || data.contains(player))
 }
 
+/// Whether a denylist module refuses `player` any interaction with the keypad.
+///
+/// Upstream's `IModuleInventory.isDenied`: a keypad without the module denies
+/// nobody; with one, `affectEveryone` denies everyone except the owner, otherwise
+/// the team/player lists deny. `KeypadBlock.useWithoutItem` checks deny **before**
+/// allow, so a listed player on both lists is refused. The owner exception is the
+/// glue's (the pure rule receives only the acting player's key).
+#[must_use]
+pub fn is_denied(installed: bool, data: &ListData, player: &str) -> bool {
+    installed && (data.affects_everyone() || data.contains(player))
+}
+
 /// The key a menu-button id stands for, `None` for an id the screen never
 /// sends.
 #[must_use]
@@ -988,6 +1000,44 @@ mod tests {
                 .with_player("alice")
                 .contains("alice"),
             "adding the same player twice keeps one entry"
+        );
+    }
+
+    #[test]
+    fn a_denied_player_is_refused() {
+        let list = ListData::new().with_player("Alice");
+        assert!(
+            is_denied(true, &list, "alice"),
+            "a listed player is denied, upstream's ListModuleData.isPlayerOnList"
+        );
+        assert!(
+            !is_denied(true, &list, "stranger"),
+            "a player who is not on the list may still interact"
+        );
+        assert!(
+            !is_denied(false, &list, "alice"),
+            "without the module the list denies nobody"
+        );
+        assert!(
+            is_denied(true, &ListData::new().affecting_everyone(true), "anyone"),
+            "a list set to affect everyone denies a player who is not named"
+        );
+    }
+
+    #[test]
+    fn the_denylist_is_bounded_and_case_insensitive() {
+        let mut list = ListData::new();
+        for index in 0..MAX_LIST_PLAYERS {
+            list = list.with_player(&format!("banned{index}"));
+        }
+        list = list.with_player("one-too-many");
+        assert!(
+            !list.contains("one-too-many"),
+            "the denylist holds at most MAX_LIST_PLAYERS players"
+        );
+        assert!(
+            list.contains("BANNED49"),
+            "denylist names compare case-insensitively like allowlist names"
         );
     }
 

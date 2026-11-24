@@ -2,8 +2,8 @@
 //!
 //! The rules — the code's shape, the salted digest, the verdict of a submitted entry, the
 //! screen mode, the key-to-button map, the signal countdown, who owns the keypad (and so who
-//! may set its code or install a module), the allowlist's listed players and the damage a wrong
-//! code deals — live in
+//! may set its code or install a module), the allowlist's and denylist's listed players and the
+//! damage a wrong code deals — live in
 //! [`runtime`], which knows nothing about the game and carries its own tests. [`support`] is
 //! the game glue, and this file is the one `impl Hooks`: the keypad's
 //! [Parts](mod_api::BlockEntityPart), the key panel item's part, the module drop, and the
@@ -157,10 +157,11 @@ impl Hooks for Mod {
         let item = r.item_key(support::KEYPAD_ITEM);
         r.item_part(item, KeyPanel);
         // A removal hook only has a `LevelHost`, which cannot resolve an id, so the
-        // keys of both droppable modules are stored once here.
+        // keys of all three droppable modules are stored once here.
         let harming_module = r.item_key(support::HARMING_MODULE);
         let allowlist_module = r.item_key(support::ALLOWLIST_MODULE);
-        support::set_module_items(harming_module, allowlist_module);
+        let denylist_module = r.item_key(support::DENYLIST_MODULE);
+        support::set_module_items(harming_module, allowlist_module, denylist_module);
     }
 
     /// `/securitycraft info|code|owner`: the harness controls this slice's e2e needs (a headless
@@ -179,6 +180,10 @@ impl Hooks for Mod {
         ));
         event.commands.push(mod_api::Command::op(
             "securitycraft allow <pos:block_pos> <who:word>",
+            2,
+        ));
+        event.commands.push(mod_api::Command::op(
+            "securitycraft deny <pos:block_pos> <who:word>",
             2,
         ));
     }

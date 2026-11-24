@@ -49,6 +49,11 @@
 #     acting player with the harness command and click with nothing typed: the keypad
 #     powers and the adjacent door opens without a code screen. Swapping the player for
 #     a stranger makes the same click open a code screen and leave the door closed.
+# 16. DENYLIST: craft the jar's denylist module (ink sac in the last row), install it on a
+#     coded keypad with an adjacent door, and put the acting player on it: the click opens
+#     nothing (`screen=playing`), the keypad stays unpowered and the door stays closed.
+#     Swapping the list to stranger makes the identical click open the code screen, still
+#     with no power and a closed door. `SELFTEST=deny` inverts the first assertion.
 # 15. RELAUNCH: the same world is quit and started again; the code stored before the
 #     restart still opens the same keypad and a wrong code is still refused, so the
 #     digest is recomputed from the saved salt rather than held in the session.
@@ -60,6 +65,7 @@
 #   SELFTEST=owner tools/e2e.sh    # phase 13b expects the stranger's code stored: exit 1
 #   SELFTEST=relaunch tools/e2e.sh # phase 15 expects the stored digest lost: exit 1
 #   SELFTEST=allow tools/e2e.sh    # phase 14 expects an allowed click not to power: exit 1
+#   SELFTEST=deny tools/e2e.sh     # phase 16 expects a denied click to open a screen: exit 1
 #   CONTROL=1 tools/e2e.sh     # no package at all: the ids must be unknown
 #   GAME=<an unmodified game> tools/e2e.sh   # the differential: the first phase fails
 #
@@ -197,6 +203,9 @@ owner_cmd() { ctl chat "/securitycraft owner $1 $2 $3 $4" >/dev/null; ctl wait 4
 # `/securitycraft allow` sets the allowlist module's one player. A single-player harness
 # cannot become a second player, so `self` and `stranger` are the two sides of the check.
 allow_cmd() { ctl chat "/securitycraft allow $1 $2 $3 $4" >/dev/null; ctl wait 4; }
+
+# `/securitycraft deny` sets the denylist module's one player, the counterpart of allow_cmd.
+deny_cmd() { ctl chat "/securitycraft deny $1 $2 $3 $4" >/dev/null; ctl wait 4; }
 
 cleanup() {
     local status=$?
@@ -847,6 +856,106 @@ echo "non-listed click: screen=$screen $line"
 [ "$(door_open "$ALLOW_DOOR_X" 101 "$ALLOW_DOOR_Z")" = false ] || fail "a non-listed click opened the door"
 ctl close >/dev/null 2>&1 || true
 
+say "phase 16: the denylist module refuses a listed player before the allowlist branch is reached"
+# Upstream's `KeypadBlock.useWithoutItem` checks `isDenied` before `isAllowed`: a denied
+# click gets a message and no interaction at all, so no screen opens and nothing powers.
+# The module is the jar's `blacklist_module` (III/IPI/ISI, iron + paper + ink sac), carried
+# under `securitycraft:denylist_module` as in 0.2.6's allowlist rename.
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl wait 2
+ctl give minecraft:iron_ingot 7 >/dev/null
+ctl give minecraft:paper 1 >/dev/null
+ctl give minecraft:ink_sac 1 >/dev/null
+ctl wait 6
+# Reuse the allowlist phase's crafting table (it is still standing at ATABLE_X/Z).
+open_screen_table "$ATABLE_X" "$ATABLE_Z"
+for cell in 100 101 102 103 105 106 108; do grid_put_one minecraft:iron_ingot "$cell"; done
+grid_put_one minecraft:paper 104
+grid_put_one minecraft:ink_sac 107
+ctl wait 4
+result=$(ctl screen | jq -r '[.slots[]? | select(.slot == 200) | .item][0] // "empty"')
+echo "denylist recipe result: $result"
+[ "$result" = securitycraft:denylist_module ] || fail "the denylist module recipe produced '$result'"
+ctl click-slot 200 shift >/dev/null || fail "cannot take the crafted denylist module"
+ctl wait 4
+left=$(ctl screen | jq -r '[.slots[]? | select(.slot >= 100 and .slot <= 108 and .item != null)] | length')
+echo "denylist grid slots still holding an item: $left"
+[ "$left" = 0 ] || fail "the denylist recipe did not consume its ingredients ($left grid slots filled)"
+held=$(inv_slot_of securitycraft:denylist_module)
+echo "denylist module in inventory slot: ${held:-none}"
+[ -n "$held" ] || fail "the crafted denylist module is not in the inventory"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4
+
+DENY_DOOR_X=$((PX+2)); DENY_DOOR_Z=$((PZ+6))
+DENY_KEY_X=$((PX+3)); DENY_KEY_Y=101; DENY_KEY_Z=$((PZ+6))
+ctl give "$DOOR" 1 >/dev/null
+ctl give securitycraft:keypad_item 1 >/dev/null
+ctl wait 6
+ctl tp "$(( DENY_DOOR_X + 1 )).5" 101 "$(( DENY_DOOR_Z + 2 )).5" >/dev/null
+ctl wait 4
+ctl look 180 0
+ctl select "$DOOR" >/dev/null
+ctl place "$DENY_DOOR_X" 101 "$DENY_DOOR_Z" >/dev/null || fail "the denylist door did not place"
+ctl wait 4
+block_name "$DENY_DOOR_X" 101 "$DENY_DOOR_Z" | grep -qx "$DOOR" || fail "no denylist door"
+[ "$(door_open "$DENY_DOOR_X" 101 "$DENY_DOOR_Z")" = false ] || fail "the denylist door started open"
+ctl tp "$(( DENY_KEY_X + 1 )).5" 101 "$(( DENY_KEY_Z + 2 )).5" >/dev/null
+ctl wait 4
+ctl select securitycraft:keypad_item >/dev/null
+ctl place "$DENY_KEY_X" "$DENY_KEY_Y" "$DENY_KEY_Z" >/dev/null || fail "the denylist keypad did not place"
+ctl wait 4
+block_name "$DENY_KEY_X" "$DENY_KEY_Y" "$DENY_KEY_Z" | grep -qx "$KEYPAD" || fail "no denylist keypad"
+code_cmd "$DENY_KEY_X" "$DENY_KEY_Y" "$DENY_KEY_Z" 1234
+line=$(info "$DENY_KEY_X" "$DENY_KEY_Y" "$DENY_KEY_Z")
+echo "coded denylist keypad: $line"
+[ "$(field code "$line")" = set ] || fail "the denylist keypad has no code: $line"
+[ "$(field modules "$line")" = none ] || fail "the denylist keypad already has a module: $line"
+
+ctl select securitycraft:denylist_module >/dev/null
+ctl tp "$(( DENY_KEY_X + 1 )).5" 101 "$(( DENY_KEY_Z + 2 )).5" >/dev/null
+ctl wait 4
+ctl look 180 0
+ctl look-at block "$DENY_KEY_X" "$DENY_KEY_Y" "$DENY_KEY_Z" south >/dev/null 2>&1 || true
+ctl interact "$DENY_KEY_X" "$DENY_KEY_Y" "$DENY_KEY_Z" south >/dev/null || fail "the keypad did not take the denylist module"
+ctl wait 6
+line=$(info "$DENY_KEY_X" "$DENY_KEY_Y" "$DENY_KEY_Z")
+echo "after installing the denylist module: $line"
+[ "$(field modules "$line")" = denylist ] || fail "the denylist module was not installed: $line"
+[ "$(field code "$line")" = set ] || fail "installing the denylist module lost the code: $line"
+[ "$(field deny "$line")" = 0 ] || fail "a fresh denylist module already has players: $line"
+
+deny_cmd "$DENY_KEY_X" "$DENY_KEY_Y" "$DENY_KEY_Z" self
+line=$(info "$DENY_KEY_X" "$DENY_KEY_Y" "$DENY_KEY_Z")
+echo "after adding the acting player to the denylist: $line"
+[ "$(field deny "$line")" = 1 ] || fail "the acting player was not added to the denylist: $line"
+screen=$(click_keypad "$DENY_KEY_X" "$DENY_KEY_Y" "$DENY_KEY_Z")
+line=$(info "$DENY_KEY_X" "$DENY_KEY_Y" "$DENY_KEY_Z")
+echo "denied click: screen=$screen $line"
+if [ "$SELFTEST" = deny ]; then
+    # Fail-capability: invert the "a denied click opens nothing" assertion.
+    [ "$screen" = container ] || fail "SELFTEST: expected the denied click to open a screen"
+fi
+[ "$screen" = playing ] || fail "a denied click opened a screen: $screen"
+[ "$(field status "$line")" = 8 ] || fail "the denied click did not set the deny status: $line"
+[ "$(field powered "$line")" = false ] || fail "a denied click powered the keypad: $line"
+[ "$(door_open "$DENY_DOOR_X" 101 "$DENY_DOOR_Z")" = false ] || fail "a denied click opened the door"
+
+# Counterfactual: swap the list to a stranger. The identical click now reaches the
+# ordinary code screen, still with no power and a closed door.
+deny_cmd "$DENY_KEY_X" "$DENY_KEY_Y" "$DENY_KEY_Z" stranger
+line=$(info "$DENY_KEY_X" "$DENY_KEY_Y" "$DENY_KEY_Z")
+echo "after swapping the denylist to a stranger: $line"
+[ "$(field deny "$line")" = 1 ] || fail "the denylist did not swap to the stranger: $line"
+screen=$(click_keypad "$DENY_KEY_X" "$DENY_KEY_Y" "$DENY_KEY_Z")
+line=$(info "$DENY_KEY_X" "$DENY_KEY_Y" "$DENY_KEY_Z")
+echo "non-denied click: screen=$screen $line"
+[ "$screen" = container ] || fail "a non-denied player did not get the code screen: $screen"
+[ "$(field powered "$line")" = false ] || fail "a non-denied click powered the keypad: $line"
+[ "$(door_open "$DENY_DOOR_X" 101 "$DENY_DOOR_Z")" = false ] || fail "a non-denied click opened the door"
+ctl close >/dev/null 2>&1 || true
+
 say "phase 15: a code set before a restart still opens the same keypad after it"
 # The digest is salted SHA-256 over data the keypad saved, so a restart re-reads the
 # same salt and the same digest from the block entity and must recompute a match. A
@@ -883,5 +992,5 @@ echo "the right code after the relaunch: $line"
 [ "$(door_open "$DOOR_X" 101 "$DOOR_Z")" = true ] || fail "the keypad's signal after the relaunch did not open the door"
 ctl close >/dev/null 2>&1 || true
 
-echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes rate-limited a correct one; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke — and survived a level-side /setblock removal as a dropped item; a keypad without the module did not hurt a wrong code; and only the owner may set a keypad's first code — a stranger's click opened no set screen, a set screen that outlived an owner change stored nothing, the owner set it, and a stranger's /securitycraft code was refused; the allowlist module crafted from seven iron and two paper was installed on a coded keypad and an allowed click with nothing typed powered it and opened its door without a code screen, while swapping the player for a stranger restored the code screen and left the door closed; and after quitting and relaunching the same world the code stored before the restart still opens the keypad and a wrong code is still refused"
+echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes rate-limited a correct one; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke — and survived a level-side /setblock removal as a dropped item; a keypad without the module did not hurt a wrong code; and only the owner may set a keypad's first code — a stranger's click opened no set screen, a set screen that outlived an owner change stored nothing, the owner set it, and a stranger's /securitycraft code was refused; the allowlist module crafted from seven iron and two paper was installed on a coded keypad and an allowed click with nothing typed powered it and opened its door without a code screen, while swapping the player for a stranger restored the code screen and left the door closed; the denylist module crafted from seven iron, paper and an ink sac was installed on a coded keypad and a listed player's click opened nothing, powered nothing and left the door closed, while swapping the list to a stranger restored the code screen with the door still closed; and after quitting and relaunching the same world the code stored before the restart still opens the keypad and a wrong code is still refused"
 # The cleanup trap prints the run's exit status as the last line.

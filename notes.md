@@ -1597,3 +1597,187 @@ list to `stranger` with the same command and the identical click must open the c
 (`screen=container`), still with `powered=false` and the door closed. `SELFTEST=deny` must invert the
 "denied click opened nothing" assertion and end `EXIT:1`. The existing allowlist phase must stay
 green when neither module denies/allows an unlisted player.
+
+## Slice 6 — the denylist module and "denied → no interaction" (2026-11-24, SDK `0a875da`) — 0.2.7
+
+**Slice.** The companion gap from slice 5's coverage table, and this file's `## Next slice`:
+
+> denylist module and its "denied → no interaction" branch | not ported — the next slice
+
+This slice adds the second carried list module and the deny branch. Class **content**, tier
+**deep** in the ledger; the delivered shape is the port's existing **logic + machines** half
+(block entity `modules` list, install via `use_item_on`, drawn panel, redstone) plus one carried
+module item with its recipe, model, texture and lang — no new block, renderer or hook kind.
+
+### Upstream read (`Geforce132/SecurityCraft`, branch `1.21.1`, commit `c4d35b0c`)
+
+The jar (`securitycraft-1.10.2.1.jar`) and the pinned commit's files, read for behaviour only:
+`items/ModuleItem.java` + `api/IModuleInventory.java` (`isDenied` before `isAllowed`),
+`components/ListModuleData.java` (`MAX_PLAYERS = 50`, case-insensitive player names),
+`blocks/KeypadBlock.java` (`useWithoutItem` dispatch), the jar's
+`assets/securitycraft/textures/item/blacklist_module.png` (506 B, extracted byte-for-byte) and
+`data/securitycraft/recipe/blacklist_module.json` (`III / IPI / ISI`, `I = c:ingots/iron`,
+`P = minecraft:paper`, **`S = minecraft:ink_sac`** — the allowlist uses paper), and the
+`module.securitycraft.keypad.blacklist_module.description` lang line ("ban listed players from
+interacting with the block").
+
+### Red proof (TDD, before the rule existed)
+
+`runtime::is_denied` was stubbed to `false`; `a_denied_player_is_refused` was added first. A
+forwarded test step (`slice6-red.log`) failed:
+
+```
+---- runtime::tests::a_denied_player_is_refused stdout ----
+
+thread 'runtime::tests::a_denied_player_is_refused' (147644) panicked at src/runtime.rs:1011:9:
+a listed player is denied, upstream's ListModuleData.isPlayerOnList
+
+test result: FAILED. 48 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+The rule became `installed && (affects_everyone || contains(player))` over the same 50-player,
+case-insensitive, duplicate-free `ListData` slice 5 proved; **51 passed**, 0 failed.
+
+### What the slice implements
+
+- **The rule** (`runtime::is_denied`), pure and unit-tested. Deny is checked **before** allow,
+  as upstream's `useWithoutItem` does, so a player on both lists is refused.
+- **Content.** `securitycraft:denylist_module` (the jar's `blacklist_module` model, 16×16
+  texture, III/IPI/ISI recipe with `minecraft:ink_sac` standing in for `c:ingots/iron`'s
+  resolved iron, lang and creative-tab entry), using the 0.2.6 rename convention.
+- **Install and drop.** The owner may install one denylist module on a keypad that does not
+  have it (creative keeps the stack); the module drops both on a player break and on a
+  level-side `/setblock` removal through the kept-list + `level_tick_post` path.
+- **The branch** (`support::on_use`, after the `verifyPasscodeSet` equivalent and **before**
+  the allowlist branch): a coded keypad whose denylist contains the acting player ends the
+  click with `InteractionResult::Fail` (so the content block's menu never opens — `screen=playing`),
+  sets `status=8` and leaves the keypad unpowered. A non-denied player falls through to the
+  allowlist branch and then the ordinary code screen. An unset keypad never reaches either
+  branch, so a list module cannot bypass the first code.
+- **Harness control** `/securitycraft deny <pos> <self|stranger|32-hex>` (op 2), the
+  counterpart of `allow`: sets the one list entry; only the owner may edit it. `/securitycraft
+  info` gains `deny=<count>` and lists `denylist` in `modules=`.
+
+### Verification (0.2.7, SDK `0a875da`, 2026-11-24)
+
+Compile/test/format/check/build steps ran through **forwarded** `build-slot.sh` leases on
+`AdLf-PC` (`build-slot: forwarding … to the remote runner`; hostname and paths quoted in
+`slice5-remote-probe.log`) with the relative `--port ports/securitycraft`, `CARGO_INCREMENTAL=0`
+and **no `BUILD_LOCAL=1`**. The launcher build and the game legs stayed local: the remote box
+has no launcher, no 26.3 resources and no renderer for this `--offscreen` e2e. The launcher's
+machine-wide native-build lock was held by other jobs during the selftest wave; the queued legs
+waited for a slot and ran unchanged (no false failure was reported). Logs are under
+`../_shared/evidence/securitycraft/` and `../_shared/evidence/securitycraft-e2e/`.
+
+| Check | Command | Result |
+|---|---|---|
+| Red | forwarded `cargo test --offline` with `is_denied` stubbed | **48 passed / 1 failed** (`slice6-red.log`) |
+| Tests | forwarded `cargo test --offline` | **51 passed**, 0 failed (`sdk-test.log`, regenerated for 0.2.7) |
+| Formatting + lints | forwarded `cargo fmt --check && cargo clippy --all-targets --offline -- -D warnings` | exit 0, **0 warnings** (`slice6-lint.log`) |
+| Package ×2 | `rm -f Cargo.lock` before each; two builds + `cmp` | **byte-identical** (`slice6-build.log`) |
+| Delivered | `securitycraft.hmod` | **67,128 B**, SHA-256 `7f1f7243129083bee719a20c14b2c232d2ed1807c4d9b539b2c28bb6aee48f7c`, **57 entries**, **no `Cargo.lock`** |
+| Registry check | forwarded `cargo horizon-mod check securitycraft.hmod` | `securitycraft 0.2.7 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, same SHA, EXIT 0 (`slice6-check-fits.log`) |
+| Pinned build | forwarded `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0, delivered SHA quoted (`slice6-check-fits.log`) |
+| Another build | forwarded `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0, same SHA (`slice6-check-fits.log`) |
+| Gate | `verify-sdk-package.py securitycraft` | **1/1**, incl. `package matches the tree`, SDK-only deps, no lock (`slice6-verify-sdk-package.log`) |
+| Launcher build | `launcher-game.sh build securitycraft` | `Compiling securitycraft (1 of 1)`, no registry crates, `native-0a875da-91db09b0e4bc` (`slice6-launcher-build.log`) |
+| In-game PASS | launcher-built game carrying 0.2.7 | **PASS + `EXIT:0`** (`securitycraft-e2e/e2e-launcher.log`), all 9 earlier legs + phase 14 + phase 15 green |
+| Control | `GAME=$CONTROL_GAME`, unmodified Nightly | **`EXIT:1`** at phase 1 (`e2e-control.log`) |
+| Ids-unknown control | `CONTROL=1` | PASS + `EXIT:0`, both ids unknown (`e2e-ids-unknown.log`) |
+| SELFTEST (door/harm/nonloot/owner/relaunch/deny) | `SELFTEST=1\|harming\|nonloot\|owner\|relaunch\|deny` | **`EXIT:1`** at each own assertion (`e2e-selftest*.log`) |
+| SELFTEST (allowlist) | `SELFTEST=allow` | **`EXIT:1`** at phase 14 ("expected an allowed click not to power the keypad") after one transparent retry (`e2e-selftest-allow.log`) |
+| Log checker | `check-e2e-logs.py securitycraft-e2e --strict` | `logs=11 ok=11`, exit 0 (`slice6-check-e2e-logs.log`) |
+
+Phase 16 quoted from `e2e-launcher.log`:
+
+```
+denylist recipe result: securitycraft:denylist_module
+denylist grid slots still holding an item: 0
+coded denylist keypad: securitycraft keypad 22 101 10 code=set entered= mode=check signal=0 powered=false status=2 modules=none allow=0 deny=0 owner=set door=21,101,10:closed
+after installing the denylist module: … modules=denylist allow=0 deny=0 owner=set door=21,101,10:closed
+after adding the acting player to the denylist: … modules=denylist allow=0 deny=1 owner=set door=21,101,10:closed
+denied click: screen=playing … powered=false status=8 modules=denylist allow=0 deny=1 owner=set door=21,101,10:closed
+after swapping the denylist to a stranger: … modules=denylist allow=0 deny=1 owner=set door=21,101,10:closed
+non-denied click: screen=container … powered=false status=0 modules=denylist allow=0 deny=1 owner=set door=21,101,10:closed
+```
+
+Both value pairs are fail-capable: `SELFTEST=deny` inverts the "denied click opens nothing"
+assertion on the delivered build; the stranger differential proves the same click would
+otherwise open the code screen. `src/runtime.rs` (`928743606d28…`) is byte-identical inside
+the package. The pre-existing phase-11b module-stash flake recorded under R9 did not recur in
+the PASS leg. In this wave `SELFTEST=allow` **did** stop at phase 11b once
+(`slice6-allow-flake-11b.log`: `items: []`, "the installed module vanished with a level-side
+removal", `EXIT:1`) before reaching its own assertion; the identical leg was retried
+transparently and then failed at its own inverted phase-14 assertion (`e2e-selftest-allow.log`,
+`EXIT:1`). Both logs are kept; the flake is not called green.
+
+### Coverage added by this slice
+
+| Family | Status |
+|---|---|
+| `securitycraft:denylist_module` item (craft, give, install, drop) | **tested** — phase 16 recipe (id/count + emptied grid), install, `all_three_installed_modules_drop` |
+| the denylist recipe (III/IPI/ISI, iron + paper + ink sac) | **tested** — phase 16: output id and an emptied grid |
+| denied → no interaction (no screen, no power, door closed) | **tested** — phase 16: `screen=playing`, `powered=false`, door `open=false`, `status=8` |
+| non-denied → ordinary code screen | **tested** — phase 16: after swapping to `stranger`, `screen=container`, still unpowered/closed |
+| deny before allow | **unit test** `a_denied_player_is_refused` + the branch order in `on_use`; the in-game keypad carries only a denylist, so precedence is structural |
+| 50-player cap, case-insensitive duplicate-free denylist | **unit test** `the_denylist_is_bounded_and_case_insensitive` |
+| `affectEveryone` arm | **unit test** `a_denied_player_is_refused`; no in-game editor (gap) |
+| team lists, customize screen, module chat messages | **not ported** — no SDK team surface, no module screen; recorded as deviations |
+| disguise / smart modules and the rest of the gap list | **not ported** — unchanged from slices 1/3/4/5 |
+
+### Deviations recorded by this slice
+
+1. **The item's id is `securitycraft:denylist_module`, not the jar's `blacklist_module`.** The
+   same rename convention as 0.2.6's `whitelist_module` → `allowlist_module`; recipe shape
+   (with the ink sac), texture and lang are the jar's.
+2. **Players are keyed by the 32-hex UUID used for `owner`, not by display name.** The pure
+   rule keeps upstream's case-insensitive name comparison; the harness needs a deterministic
+   stand-in for "the acting player" and "a stranger".
+3. **`/securitycraft deny` sets the one list entry; upstream's customize screen adds/removes.**
+   A harness addition, recorded as such.
+4. **No team list and no in-game `affectEveryone` editor.** The pure rule carries both arms;
+   only the player list is editable (harness command).
+5. **A denied click reads `status=8` in the readout**, not a `messages.securitycraft` chat
+   line (the mod's message keys are not carried); the panel has one failure line.
+6. **Module data is still ids + separate player lists, not an `ItemStack` component**
+   (slice 3's deviation); installing and dropping are faithful, a component round-trip is not.
+7. **The owner exception in `isDenied` is not modelled in the pure rule.** The acting player is
+   the owner of the harness keypad and is the one being denied, exactly as upstream's
+   `affectEveryone` arm denies everyone *except* the owner; the port's single-player harness
+   cannot stand a non-owner in front of the keypad, so the exception is a gap recorded here
+   rather than a behaviour claimed.
+
+### Changelog for the resubmission (0.2.7)
+
+> Supersedes #1805→0.2.6 (the staged PR). Adds the denylist module carried from the jar
+> (`blacklist_module`'s recipe with an ink sac, texture and lang, under the current
+> `denylist_module` id) and upstream's `isDenied` branch: after `verifyPasscodeSet`, a listed
+> player's click opens nothing and powers nothing, while everyone else falls through to the
+> allowlist branch and then the code screen. A harness-only `/securitycraft deny` stands in for
+> the customize screen, `/securitycraft info` reports `deny=` and the new module id, and the e2e
+> proves the refusal and its stranger differential with an inverted SELFTEST. The SHA-256
+> primitive, SDK-only dependency set and save format are unchanged.
+
+## Next slice
+
+**Family:** the **smart module gate on the retry cooldown** — from slice 3's recorded deviation
+("the port's throttle is unconditional since review #1197, so a keypad without the smart module
+still rate-limits") and the gap line "the smart and harming modules; the disguise module". It fits
+tier **deep** in the same logic+machines shape: one more carried module item (the jar's
+`smart_module` recipe/model/texture/lang), one more id in `modules`, the same owner install/drop
+paths, and a pure rule that makes the existing `Throttle` conditional on the module being
+installed — no new block, renderer or hook kind.
+
+**Why it is the next one:** the module install/drop machinery, the `modules` list and the
+server-side `Throttle` already exist and are proved; only one item id and one gate are new. It
+also closes a real upstream deviation rather than adding inert content. The disguise module
+needs a client tint path, which this pin may not expose, so it stays behind it.
+
+**In-game assertion that would prove it:** on a coded keypad without any module, enter five wrong
+codes and then the right one — `/securitycraft info` must read `status=3`, `powered=true` and the
+adjacent door `open=true` (upstream has no cooldown without the smart module). Install the smart
+module on a second coded keypad, repeat the five wrong codes, and the right code must instead be
+refused with `status=6`, `powered=false` and the door `closed`. `SELFTEST=smart` must invert the
+first (no-module) assertion and end `EXIT:1`; the deny/allow phases must stay green in the same
+leg. If the pin cannot express the per-player cooldown without the module, stop and report the
+gap instead of faking it.

@@ -5,10 +5,10 @@ against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`.
 
 - **`horizon-mod.toml`** — the only manifest and the only identity
-  (`id = "securitycraft"`, `version = "0.2.6"`, `side = "both"`, `[native]` pins).
+  (`id = "securitycraft"`, `version = "0.2.7"`, `side = "both"`, `[native]` pins).
 - **`src/runtime.rs`** — the pure rules (code shape, salted digest, verdict, entry,
-  mode, signal countdown, who may set a code or install a module, the allowlist's
-  listed players, and the wrong-code damage) and their tests. It also carries the
+  mode, signal countdown, who may set a code or install a module, the allowlist's and
+  denylist's listed players, and the wrong-code damage) and their tests. It also carries the
   port's **own SHA-256**, because the
   registry refuses a package that declares any dependency but the SDK
   (`tools/native-subset/src/manifests.rs`, R9) — the digest crate cannot travel with a
@@ -16,15 +16,18 @@ against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
 - **`src/support.rs`** — the game glue: the block entity's saved data (code, salt,
   owner, modules), the screen's key rectangles and drawing, the menu buttons, the
   redstone, the owner gate on setting a code, the module install, the wrong-code
-  damage, the allowlist's "allowed → open without a code" branch, the module drop
-  and the harness commands.
+  damage, the denylist's "denied → no interaction" branch (before allow), the
+  allowlist's "allowed → open without a code" branch, the module drop and the harness
+  commands.
 - **`src/lib.rs`** — the one `impl mod_api::Hooks`, the keypad's Parts and the key
   panel item's Part (which records the owner).
 - **`assets/`, `data/`** — the carried content: the `securitycraft:keypad` block and
   its `keypad_item`, the `securitycraft:iron_door_reinforced` block, the harming
   module (`securitycraft:harming_module`, its recipe and its
   `securitycraft:incorrect_passcode` damage type), the allowlist module
-  (`securitycraft:allowlist_module`, carried as the jar's `whitelist_module`), the jar's
+  (`securitycraft:allowlist_module`, carried as the jar's `whitelist_module`), the
+  denylist module (`securitycraft:denylist_module`, carried as the jar's
+  `blacklist_module`, III/IPI/ISI with an ink sac), the jar's
   blockstates, models,
   textures, loot, recipes, tag and lang, plus the keypad's content menu type.
 - **`securitycraft.hmod`** — the delivered package (built by
@@ -66,10 +69,11 @@ game with `horizon-ctl` (place, screen keys, wrong/right codes, module install, 
 recipe, break drops, a level-side `/setblock` removal that must keep the module, the
 owner gate on setting a code — proved by moving the owner to a stranger with the
 harness-only `/securitycraft owner` — the allowlist module's crafted recipe, install and
-"allowed → open without a code" branch (with a stranger differential), and a
+"allowed → open without a code" branch (with a stranger differential), the denylist
+module's crafted recipe and its "denied → no interaction" branch, and a
 quit-and-relaunch leg where the code stored before the restart still opens the keypad).
-`SELFTEST=1`, `SELFTEST=harming`, `SELFTEST=nonloot`, `SELFTEST=owner`, `SELFTEST=allow`
-and `SELFTEST=relaunch` prove the assertions can fail, and
+`SELFTEST=1`, `SELFTEST=harming`, `SELFTEST=nonloot`, `SELFTEST=owner`, `SELFTEST=allow`,
+`SELFTEST=deny` and `SELFTEST=relaunch` prove the assertions can fail, and
 `GAME=$CONTROL_GAME` runs the same scenario on an unmodified game, which fails at the
 first mod id. The evidence is under `ports/_shared/evidence/securitycraft-e2e/`.
 

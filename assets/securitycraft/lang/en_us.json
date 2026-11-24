@@ -5,7 +5,9 @@
     "itemGroup.securitycraft": "SecurityCraft",
     "item.securitycraft.harming_module": "Harming Module",
     "item.securitycraft.allowlist_module": "Allowlist Module",
+    "item.securitycraft.denylist_module": "Denylist Module",
     "module.securitycraft.keypad.allowlist_module.description": "Adding an allowlist module to a keypad will allow listed players to use the block without knowing the code.",
+    "module.securitycraft.keypad.denylist_module.description": "Adding a denylist module to a keypad will ban listed players from interacting with the block.",
     "death.attack.securitycraft.incorrectPasscode": "%s entered an incorrect code",
     "death.attack.securitycraft.incorrectPasscode.player": "%1$s entered an incorrect code whilst fighting %2$s"
 }

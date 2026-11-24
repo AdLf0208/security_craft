@@ -5,6 +5,7 @@
     "securitycraft:keypad_item",
     "securitycraft:iron_door_reinforced",
     "securitycraft:harming_module",
-    "securitycraft:allowlist_module"
+    "securitycraft:allowlist_module",
+    "securitycraft:denylist_module"
   ]
 }

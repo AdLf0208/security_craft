@@ -33,8 +33,8 @@ use mod_api::{
 
 use crate::runtime::{
     Action, Button, DEFAULT_SIGNAL_TICKS, Entry, ListData, Mode, Throttle, after_submit, button,
-    facing_from_yaw, hash_code, is_allowed, may_install, may_set_code, new_salt, tick_signal,
-    valid_code, wrong_code_damage,
+    facing_from_yaw, hash_code, is_allowed, is_denied, may_install, may_set_code, new_salt,
+    tick_signal, valid_code, wrong_code_damage,
 };
 
 /// The keypad block; its item (`securitycraft:keypad_item`) places it.
@@ -69,6 +69,8 @@ const KEY_MODULES: &str = "modules";
 /// The players on the allowlist module, as 32-hex UUIDs (a harness spelling of
 /// upstream's case-insensitive player names — see the deviation in `notes.md`).
 const KEY_ALLOWLIST: &str = "allowlist";
+/// The players on the denylist module, as 32-hex UUIDs (same harness spelling).
+const KEY_DENYLIST: &str = "denylist";
 
 /// The harming module's item id.
 pub(crate) const HARMING_MODULE: &str = "securitycraft:harming_module";
@@ -76,6 +78,10 @@ pub(crate) const HARMING_MODULE: &str = "securitycraft:harming_module";
 /// `whitelist_module` (`ModuleType.ALLOWLIST`); the port uses the module's current
 /// name, recorded as a deviation in `notes.md`.
 pub(crate) const ALLOWLIST_MODULE: &str = "securitycraft:allowlist_module";
+/// The denylist module's item id. Upstream's jar registers this item as
+/// `blacklist_module` (`ModuleType.DENYLIST`); the port uses the module's current
+/// name, as it did for the allowlist (recorded as a deviation in `notes.md`).
+pub(crate) const DENYLIST_MODULE: &str = "securitycraft:denylist_module";
 /// The damage type a wrong code uses (`data/securitycraft/damage_type/incorrect_passcode.json`),
 /// upstream's `CustomDamageSources.INCORRECT_PASSCODE`.
 pub(crate) const INCORRECT_PASSCODE: &str = "securitycraft:incorrect_passcode";
@@ -85,13 +91,18 @@ pub(crate) const INCORRECT_PASSCODE: &str = "securitycraft:incorrect_passcode";
 struct ModuleItems {
     harming: ItemKey,
     allowlist: ItemKey,
+    denylist: ItemKey,
 }
 
 static MODULE_ITEMS: OnceLock<ModuleItems> = OnceLock::new();
 
-/// Store both module keys at registration.
-pub(crate) fn set_module_items(harming: ItemKey, allowlist: ItemKey) {
-    let _ = MODULE_ITEMS.set(ModuleItems { harming, allowlist });
+/// Store all three module keys at registration.
+pub(crate) fn set_module_items(harming: ItemKey, allowlist: ItemKey, denylist: ItemKey) {
+    let _ = MODULE_ITEMS.set(ModuleItems {
+        harming,
+        allowlist,
+        denylist,
+    });
 }
 
 fn module_item(module: &str) -> Option<ItemKey> {
@@ -99,6 +110,7 @@ fn module_item(module: &str) -> Option<ItemKey> {
     match module {
         HARMING_MODULE => Some(items.harming),
         ALLOWLIST_MODULE => Some(items.allowlist),
+        DENYLIST_MODULE => Some(items.denylist),
         _ => None,
     }
 }
@@ -118,6 +130,9 @@ const STATUS_LOCKED: i32 = 6;
 /// The screen's "not your keypad" answer. A stranger's set screen never opens
 /// (`may_set_code`), so this status is read from `/securitycraft info`, not drawn.
 const STATUS_NOT_OWNER: i32 = 7;
+/// A denied click's status in `/securitycraft info`. Upstream sends a deny chat
+/// message; the drawn panel has one failure line, so the refusal is read here.
+const STATUS_DENIED: i32 = 8;
 
 /// The screen's button grid: 1-9, then backspace, 0 and submit. The same
 /// rectangles are hit-tested by `screen_click` and drawn by `screen_draw`, both
@@ -292,6 +307,40 @@ fn allow_data(nbt: &Compound) -> ListData {
         .fold(ListData::new(), |data, player| data.with_player(&player))
 }
 
+/// The players on the denylist module, in insertion order.
+fn denylist(nbt: &Compound) -> Vec<String> {
+    match tag(nbt, KEY_DENYLIST) {
+        Some(Tag::List(values)) => values
+            .iter()
+            .filter_map(|value| match value {
+                Tag::String(text) => Some(text.to_string_lossy()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn set_denylist(nbt: &mut Compound, players: &[String]) {
+    put(
+        nbt,
+        KEY_DENYLIST,
+        Tag::List(
+            players
+                .iter()
+                .map(|player| Tag::String(player.as_str().into()))
+                .collect(),
+        ),
+    );
+}
+
+/// The pure rules' view of the saved denylist (bounded, case-insensitive).
+fn deny_data(nbt: &Compound) -> ListData {
+    denylist(nbt)
+        .into_iter()
+        .fold(ListData::new(), |data, player| data.with_player(&player))
+}
+
 // --- the world ------------------------------------------------------------
 
 /// The authoritative level the server acts in now: the one a block entity's
@@ -442,6 +491,7 @@ pub(crate) fn on_use(
         .and_then(|stack| match stack.item().id(&*host).as_str() {
             HARMING_MODULE => Some(HARMING_MODULE),
             ALLOWLIST_MODULE => Some(ALLOWLIST_MODULE),
+            DENYLIST_MODULE => Some(DENYLIST_MODULE),
             _ => None,
         });
     if let Some(module) = module
@@ -491,11 +541,29 @@ pub(crate) fn on_use(
         let _ = entity.set_data_slots(host, slots);
         return Some(InteractionResult::Fail);
     }
-    // Upstream's `KeypadBlock.useWithoutItem`, after `verifyPasscodeSet`: a denied
-    // player is refused (no denylist module in this slice), an allowed player is
-    // activated without typing a code, and everyone else gets the code screen.
-    // An unset keypad never reaches here — `verifyPasscodeSet` opens the owner's
-    // set screen and returns false — so the allowlist cannot bypass the first code.
+    // Upstream's `KeypadBlock.useWithoutItem`, after `verifyPasscodeSet`: the deny
+    // branch runs **before** allow, then an allowed player is activated without
+    // typing a code, and everyone else gets the code screen. An unset keypad never
+    // reaches here — `verifyPasscodeSet` opens the owner's set screen and returns
+    // false — so neither list module can bypass the first code.
+    if mode == Mode::Check && has_module(&data, DENYLIST_MODULE) {
+        let player_key = format!("{:032x}", click.player);
+        if is_denied(true, &deny_data(&data), &player_key) {
+            // A denied click opens nothing, powers nothing and leaves the door shut;
+            // the panel has one failure line, so the refusal reads as a status here.
+            set_int(&mut data, KEY_STATUS, STATUS_DENIED);
+            set_int(&mut data, KEY_MODE, Mode::Check.code());
+            let slots = data_slots(&*host, level, pos, &data, 0);
+            let _ = entity.replace_data(host, data);
+            let _ = entity.set_data_slots(host, slots);
+            if let Some(session) = session_of(&*host, level, pos, click.player) {
+                clear_session(&session);
+            }
+            // The content block opens the menu itself, so end the click to keep the
+            // player in `playing` (upstream's denied click opens no screen).
+            return Some(InteractionResult::Fail);
+        }
+    }
     if mode == Mode::Check && has_module(&data, ALLOWLIST_MODULE) {
         let player_key = format!("{:032x}", click.player);
         if is_allowed(true, &allow_data(&data), &player_key) {
@@ -928,7 +996,12 @@ pub(crate) fn on_state_for_placement(
 fn dropped_module_ids(installed: &[String]) -> Vec<String> {
     installed
         .iter()
-        .filter(|module| matches!(module.as_str(), HARMING_MODULE | ALLOWLIST_MODULE))
+        .filter(|module| {
+            matches!(
+                module.as_str(),
+                HARMING_MODULE | ALLOWLIST_MODULE | DENYLIST_MODULE
+            )
+        })
         .cloned()
         .collect()
 }
@@ -1102,6 +1175,9 @@ fn keypad_info(
         if has_module(&data, ALLOWLIST_MODULE) {
             names.push("allowlist");
         }
+        if has_module(&data, DENYLIST_MODULE) {
+            names.push("denylist");
+        }
         if names.is_empty() {
             "none".to_owned()
         } else {
@@ -1109,7 +1185,7 @@ fn keypad_info(
         }
     };
     Some(format!(
-        "securitycraft keypad {} {} {} code={} entered={} mode={} signal={} powered={} status={} modules={} allow={} owner={} door={door}",
+        "securitycraft keypad {} {} {} code={} entered={} mode={} signal={} powered={} status={} modules={} allow={} deny={} owner={} door={door}",
         pos[0],
         pos[1],
         pos[2],
@@ -1128,6 +1204,7 @@ fn keypad_info(
         int(&data, KEY_STATUS),
         installed,
         allowlist(&data).len(),
+        denylist(&data).len(),
         if owner_of(&data).is_some() {
             "set"
         } else {
@@ -1192,6 +1269,8 @@ const OWNER_USAGE: &str = "Usage: /securitycraft owner <x> <y> <z> <self|strange
 
 /// The usage line of the harness's allowlist editor.
 const ALLOW_USAGE: &str = "Usage: /securitycraft allow <x> <y> <z> <self|stranger|32-hex>";
+/// The usage line of the harness's denylist editor.
+const DENY_USAGE: &str = "Usage: /securitycraft deny <x> <y> <z> <self|stranger|32-hex>";
 
 /// `/securitycraft owner <pos> <self|stranger>`: changes a keypad's owner.
 ///
@@ -1293,6 +1372,54 @@ fn set_allow(
     ))
 }
 
+/// `/securitycraft deny <pos> <self|stranger|32-hex>`: **sets** a keypad's installed
+/// denylist module to exactly one player. The counterpart of [`set_allow`]: upstream
+/// edits the `ListModuleData` component in a customize screen a headless harness
+/// cannot open, so this harness command writes the same single player into the saved
+/// data. Replacing is deliberate — `self` and `stranger` are the two sides of the deny
+/// check. Only the owner may edit it, and the module must be installed first.
+fn set_deny(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    who: &str,
+    asking: Option<u128>,
+) -> Result<String, String> {
+    let player = match who {
+        "self" => asking,
+        "stranger" => Some(HARNESS_STRANGER),
+        hex if hex.len() == 32 => u128::from_str_radix(hex, 16).ok(),
+        _ => None,
+    }
+    .ok_or_else(|| DENY_USAGE.to_owned())?;
+    if block_at(&*host, level, pos) != KEYPAD {
+        return Err("No keypad at that position.".to_owned());
+    }
+    let entity = host
+        .block_entity(level, pos)
+        .ok_or_else(|| "No keypad at that position.".to_owned())?;
+    let mut data = entity
+        .data(&*host)
+        .ok_or_else(|| "No keypad at that position.".to_owned())?;
+    if !asking.is_some_and(|actor| may_set_code(owner_of(&data), actor)) {
+        return Err("Only the keypad's owner can change its denylist.".to_owned());
+    }
+    if !has_module(&data, DENYLIST_MODULE) {
+        return Err("Install a denylist module first.".to_owned());
+    }
+    let list = ListData::new().with_player(&format!("{player:032x}"));
+    set_denylist(&mut data, list.players());
+    let slots = data_slots(&*host, level, pos, &data, 0);
+    entity
+        .replace_data(host, data)
+        .map_err(|_| "No keypad at that position.".to_owned())?;
+    let _ = entity.set_data_slots(host, slots);
+    Ok(format!(
+        "Denylist now has {} player(s).",
+        list.players().len()
+    ))
+}
+
 /// Answers a `/securitycraft` invocation, or `None` when it is not one.
 pub(crate) fn command(
     host: &mut dyn ServerHost,
@@ -1371,6 +1498,23 @@ pub(crate) fn command(
                 .into_iter()
                 .find(|level| level.dimension() == invocation.dimension)?;
             Some(set_allow(host, level, pos, who, asking).unwrap_or_else(|line| line))
+        }
+        ["securitycraft", "deny"] => {
+            let Some(mod_api::CommandArgumentValue::BlockPos(pos)) = invocation.argument("pos")
+            else {
+                return Some(DENY_USAGE.to_owned());
+            };
+            let pos = *pos;
+            let Some(mod_api::CommandArgumentValue::String(who)) = invocation.argument("who")
+            else {
+                return Some(DENY_USAGE.to_owned());
+            };
+            let level = host
+                .levels()
+                .list_levels()
+                .into_iter()
+                .find(|level| level.dimension() == invocation.dimension)?;
+            Some(set_deny(host, level, pos, who, asking).unwrap_or_else(|line| line))
         }
         _ => None,
     }
@@ -1579,6 +1723,43 @@ mod tests {
         assert_eq!(
             dropped_module_ids(&modules(&nbt)),
             vec![HARMING_MODULE.to_owned(), ALLOWLIST_MODULE.to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_denylist_round_trips_through_the_saved_compound() {
+        let mut nbt = Compound::new();
+        add_module(&mut nbt, DENYLIST_MODULE);
+        assert!(has_module(&nbt, DENYLIST_MODULE));
+        set_denylist(&mut nbt, &["0123456789abcdef0123456789abcdef".to_owned()]);
+        let data = deny_data(&nbt);
+        assert!(is_denied(
+            has_module(&nbt, DENYLIST_MODULE),
+            &data,
+            "0123456789abcdef0123456789abcdef"
+        ));
+        assert!(!is_denied(
+            has_module(&nbt, DENYLIST_MODULE),
+            &data,
+            "deadbeefdeadbeefdeadbeefdeadbeef"
+        ));
+        set_int(&mut nbt, KEY_DENYLIST, 1);
+        assert!(denylist(&nbt).is_empty());
+    }
+
+    #[test]
+    fn all_three_installed_modules_drop() {
+        let mut nbt = Compound::new();
+        add_module(&mut nbt, HARMING_MODULE);
+        add_module(&mut nbt, ALLOWLIST_MODULE);
+        add_module(&mut nbt, DENYLIST_MODULE);
+        assert_eq!(
+            dropped_module_ids(&modules(&nbt)),
+            vec![
+                HARMING_MODULE.to_owned(),
+                ALLOWLIST_MODULE.to_owned(),
+                DENYLIST_MODULE.to_owned()
+            ]
         );
     }
 
