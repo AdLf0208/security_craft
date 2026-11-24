@@ -32,9 +32,9 @@ use mod_api::{
 };
 
 use crate::runtime::{
-    Action, Button, DEFAULT_SIGNAL_TICKS, Entry, Mode, Throttle, after_submit, button,
-    facing_from_yaw, hash_code, may_install, may_set_code, new_salt, tick_signal, valid_code,
-    wrong_code_damage,
+    Action, Button, DEFAULT_SIGNAL_TICKS, Entry, ListData, Mode, Throttle, after_submit, button,
+    facing_from_yaw, hash_code, is_allowed, may_install, may_set_code, new_salt, tick_signal,
+    valid_code, wrong_code_damage,
 };
 
 /// The keypad block; its item (`securitycraft:keypad_item`) places it.
@@ -66,25 +66,41 @@ const KEY_SIGNAL: &str = "signal";
 const KEY_OWNER: &str = "owner";
 /// The module ids installed in the keypad, as a list of strings.
 const KEY_MODULES: &str = "modules";
+/// The players on the allowlist module, as 32-hex UUIDs (a harness spelling of
+/// upstream's case-insensitive player names — see the deviation in `notes.md`).
+const KEY_ALLOWLIST: &str = "allowlist";
 
-/// The harming module's item id: the one module this slice installs.
+/// The harming module's item id.
 pub(crate) const HARMING_MODULE: &str = "securitycraft:harming_module";
+/// The allowlist module's item id. Upstream's jar registers this item as
+/// `whitelist_module` (`ModuleType.ALLOWLIST`); the port uses the module's current
+/// name, recorded as a deviation in `notes.md`.
+pub(crate) const ALLOWLIST_MODULE: &str = "securitycraft:allowlist_module";
 /// The damage type a wrong code uses (`data/securitycraft/damage_type/incorrect_passcode.json`),
 /// upstream's `CustomDamageSources.INCORRECT_PASSCODE`.
 pub(crate) const INCORRECT_PASSCODE: &str = "securitycraft:incorrect_passcode";
 
-/// The harming module's resolved item identity. A `block_drops` listener is given a
-/// `LevelHost`, not a `Host`, so it cannot resolve an id; the key is stored once at
-/// registration instead.
-static HARMING_MODULE_ITEM: OnceLock<ItemKey> = OnceLock::new();
-
-/// Store the harming module's resolved item identity (`register`).
-pub(crate) fn set_harming_module_item(item: ItemKey) {
-    let _ = HARMING_MODULE_ITEM.set(item);
+/// The resolved item identities of the modules a removed keypad drops. A `LevelHost`
+/// cannot resolve an id, so the keys are stored once at registration instead.
+struct ModuleItems {
+    harming: ItemKey,
+    allowlist: ItemKey,
 }
 
-fn harming_module_item() -> Option<ItemKey> {
-    HARMING_MODULE_ITEM.get().copied()
+static MODULE_ITEMS: OnceLock<ModuleItems> = OnceLock::new();
+
+/// Store both module keys at registration.
+pub(crate) fn set_module_items(harming: ItemKey, allowlist: ItemKey) {
+    let _ = MODULE_ITEMS.set(ModuleItems { harming, allowlist });
+}
+
+fn module_item(module: &str) -> Option<ItemKey> {
+    let items = MODULE_ITEMS.get()?;
+    match module {
+        HARMING_MODULE => Some(items.harming),
+        ALLOWLIST_MODULE => Some(items.allowlist),
+        _ => None,
+    }
 }
 
 /// The block property the keypad's redstone and its "powered" look read.
@@ -242,6 +258,40 @@ fn add_module(nbt: &mut Compound, module: &str) {
     );
 }
 
+/// The players on the allowlist module, in insertion order.
+fn allowlist(nbt: &Compound) -> Vec<String> {
+    match tag(nbt, KEY_ALLOWLIST) {
+        Some(Tag::List(values)) => values
+            .iter()
+            .filter_map(|value| match value {
+                Tag::String(text) => Some(text.to_string_lossy()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn set_allowlist(nbt: &mut Compound, players: &[String]) {
+    put(
+        nbt,
+        KEY_ALLOWLIST,
+        Tag::List(
+            players
+                .iter()
+                .map(|player| Tag::String(player.as_str().into()))
+                .collect(),
+        ),
+    );
+}
+
+/// The pure rules' view of the saved allowlist (bounded, case-insensitive).
+fn allow_data(nbt: &Compound) -> ListData {
+    allowlist(nbt)
+        .into_iter()
+        .fold(ListData::new(), |data, player| data.with_player(&player))
+}
+
 // --- the world ------------------------------------------------------------
 
 /// The authoritative level the server acts in now: the one a block entity's
@@ -387,12 +437,19 @@ pub(crate) fn on_use(
     // A module in the owner's hand is installed first, as upstream's `ModuleItem.useOn`
     // runs before the block's own use. A stranger's module, a second one of a type the
     // keypad already has and any other held item all fall through to the menu below.
-    if let Some(stack) = click.stack
-        && stack.item().id(&*host) == HARMING_MODULE
+    let module = click
+        .stack
+        .and_then(|stack| match stack.item().id(&*host).as_str() {
+            HARMING_MODULE => Some(HARMING_MODULE),
+            ALLOWLIST_MODULE => Some(ALLOWLIST_MODULE),
+            _ => None,
+        });
+    if let Some(module) = module
+        && let Some(stack) = click.stack
         && may_install(owner_of(&data), click.player)
-        && !has_module(&data, HARMING_MODULE)
+        && !has_module(&data, module)
     {
-        add_module(&mut data, HARMING_MODULE);
+        add_module(&mut data, module);
         // The removal that follows a level-side write hears this entity gone,
         // so the list it drops from is recorded here, not read at removal.
         let installed = modules(&data);
@@ -433,6 +490,27 @@ pub(crate) fn on_use(
         let _ = entity.replace_data(host, data);
         let _ = entity.set_data_slots(host, slots);
         return Some(InteractionResult::Fail);
+    }
+    // Upstream's `KeypadBlock.useWithoutItem`, after `verifyPasscodeSet`: a denied
+    // player is refused (no denylist module in this slice), an allowed player is
+    // activated without typing a code, and everyone else gets the code screen.
+    // An unset keypad never reaches here — `verifyPasscodeSet` opens the owner's
+    // set screen and returns false — so the allowlist cannot bypass the first code.
+    if mode == Mode::Check && has_module(&data, ALLOWLIST_MODULE) {
+        let player_key = format!("{:032x}", click.player);
+        if is_allowed(true, &allow_data(&data), &player_key) {
+            set_int(&mut data, KEY_STATUS, STATUS_OPENED);
+            set_int(&mut data, KEY_MODE, Mode::Check.code());
+            set_int(&mut data, KEY_SIGNAL, DEFAULT_SIGNAL_TICKS);
+            let slots = data_slots(&*host, level, pos, &data, 0);
+            let _ = entity.replace_data(host, data);
+            let _ = entity.set_data_slots(host, slots);
+            if let Some(session) = session_of(&*host, level, pos, click.player) {
+                clear_session(&session);
+            }
+            host.set_block_property(pos, POWERED, "true");
+            return Some(InteractionResult::SuccessServer);
+        }
     }
     set_int(&mut data, KEY_MODE, mode.code());
     set_int(&mut data, KEY_STATUS, STATUS_NONE);
@@ -850,7 +928,7 @@ pub(crate) fn on_state_for_placement(
 fn dropped_module_ids(installed: &[String]) -> Vec<String> {
     installed
         .iter()
-        .filter(|module| module.as_str() == HARMING_MODULE)
+        .filter(|module| matches!(module.as_str(), HARMING_MODULE | ALLOWLIST_MODULE))
         .cloned()
         .collect()
 }
@@ -946,11 +1024,11 @@ pub(crate) fn on_level_tick_post(host: &mut dyn ServerHost, event: &mut LevelTic
         }
         ready
     };
-    let Some(item) = harming_module_item() else {
-        return;
-    };
     for ((_, pos), modules) in ready {
-        for _ in dropped_module_ids(&modules) {
+        for module in dropped_module_ids(&modules) {
+            let Some(item) = module_item(&module) else {
+                continue;
+            };
             let _ = event.level.spawn_item(
                 host,
                 f64::from(pos[0]) + 0.5,
@@ -1016,8 +1094,22 @@ fn keypad_info(
         );
         break;
     }
+    let installed = {
+        let mut names = Vec::new();
+        if has_module(&data, HARMING_MODULE) {
+            names.push("harming");
+        }
+        if has_module(&data, ALLOWLIST_MODULE) {
+            names.push("allowlist");
+        }
+        if names.is_empty() {
+            "none".to_owned()
+        } else {
+            names.join(",")
+        }
+    };
     Some(format!(
-        "securitycraft keypad {} {} {} code={} entered={} mode={} signal={} powered={} status={} modules={} owner={} door={door}",
+        "securitycraft keypad {} {} {} code={} entered={} mode={} signal={} powered={} status={} modules={} allow={} owner={} door={door}",
         pos[0],
         pos[1],
         pos[2],
@@ -1034,11 +1126,8 @@ fn keypad_info(
             "false"
         },
         int(&data, KEY_STATUS),
-        if has_module(&data, HARMING_MODULE) {
-            "harming"
-        } else {
-            "none"
-        },
+        installed,
+        allowlist(&data).len(),
         if owner_of(&data).is_some() {
             "set"
         } else {
@@ -1101,6 +1190,9 @@ const HARNESS_STRANGER: u128 = 0xdead_beef_dead_beef_dead_beef_dead_beef;
 /// nor a 32-digit UUID.
 const OWNER_USAGE: &str = "Usage: /securitycraft owner <x> <y> <z> <self|stranger>";
 
+/// The usage line of the harness's allowlist editor.
+const ALLOW_USAGE: &str = "Usage: /securitycraft allow <x> <y> <z> <self|stranger|32-hex>";
+
 /// `/securitycraft owner <pos> <self|stranger>`: changes a keypad's owner.
 ///
 /// Upstream's owner changes through the Universal Owner Changer, and the keypad's
@@ -1148,6 +1240,57 @@ fn set_owner(
         clear_keypad(&dimension, pos);
     }
     keypad_info(host, level, pos, asking).ok_or_else(|| "No keypad at that position.".to_owned())
+}
+
+/// `/securitycraft allow <pos> <self|stranger|32-hex>`: **sets** a keypad's installed
+/// allowlist module to exactly one player. Upstream edits the module's `ListModuleData`
+/// component in its customize screen, which a headless harness cannot open, so this
+/// harness command writes the same list into the keypad's saved data. Replacing (rather
+/// than appending) is deliberate: a single-player harness must be able to swap itself
+/// for a stranger and get the other side of the check with one command. Only the owner
+/// may edit it (upstream's `ModuleItem.useOn` owner gate), and the module must be
+/// installed first. `self` is the acting player, `stranger` the harness's fixed
+/// non-player UUID.
+fn set_allow(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    who: &str,
+    asking: Option<u128>,
+) -> Result<String, String> {
+    let player = match who {
+        "self" => asking,
+        "stranger" => Some(HARNESS_STRANGER),
+        hex if hex.len() == 32 => u128::from_str_radix(hex, 16).ok(),
+        _ => None,
+    }
+    .ok_or_else(|| ALLOW_USAGE.to_owned())?;
+    if block_at(&*host, level, pos) != KEYPAD {
+        return Err("No keypad at that position.".to_owned());
+    }
+    let entity = host
+        .block_entity(level, pos)
+        .ok_or_else(|| "No keypad at that position.".to_owned())?;
+    let mut data = entity
+        .data(&*host)
+        .ok_or_else(|| "No keypad at that position.".to_owned())?;
+    if !asking.is_some_and(|actor| may_set_code(owner_of(&data), actor)) {
+        return Err("Only the keypad's owner can change its allowlist.".to_owned());
+    }
+    if !has_module(&data, ALLOWLIST_MODULE) {
+        return Err("Install an allowlist module first.".to_owned());
+    }
+    let list = ListData::new().with_player(&format!("{player:032x}"));
+    set_allowlist(&mut data, list.players());
+    let slots = data_slots(&*host, level, pos, &data, 0);
+    entity
+        .replace_data(host, data)
+        .map_err(|_| "No keypad at that position.".to_owned())?;
+    let _ = entity.set_data_slots(host, slots);
+    Ok(format!(
+        "Allowlist now has {} player(s).",
+        list.players().len()
+    ))
 }
 
 /// Answers a `/securitycraft` invocation, or `None` when it is not one.
@@ -1211,6 +1354,23 @@ pub(crate) fn command(
                 .into_iter()
                 .find(|level| level.dimension() == invocation.dimension)?;
             Some(set_owner(host, level, pos, who, asking).unwrap_or_else(|line| line))
+        }
+        ["securitycraft", "allow"] => {
+            let Some(mod_api::CommandArgumentValue::BlockPos(pos)) = invocation.argument("pos")
+            else {
+                return Some(ALLOW_USAGE.to_owned());
+            };
+            let pos = *pos;
+            let Some(mod_api::CommandArgumentValue::String(who)) = invocation.argument("who")
+            else {
+                return Some(ALLOW_USAGE.to_owned());
+            };
+            let level = host
+                .levels()
+                .list_levels()
+                .into_iter()
+                .find(|level| level.dimension() == invocation.dimension)?;
+            Some(set_allow(host, level, pos, who, asking).unwrap_or_else(|line| line))
         }
         _ => None,
     }
@@ -1385,6 +1545,40 @@ mod tests {
         assert_eq!(
             take_modules(nether, [5, 64, 5]),
             vec![HARMING_MODULE.to_owned()]
+        );
+    }
+
+    #[test]
+    fn an_allowlist_round_trips_through_the_saved_compound() {
+        // The harness writes player keys to the saved list; the allow branch reads
+        // them back through the pure rules. A corrupt value grants nobody access.
+        let mut nbt = Compound::new();
+        add_module(&mut nbt, ALLOWLIST_MODULE);
+        assert!(has_module(&nbt, ALLOWLIST_MODULE));
+        set_allowlist(&mut nbt, &["0123456789abcdef0123456789abcdef".to_owned()]);
+        let data = allow_data(&nbt);
+        assert!(is_allowed(
+            has_module(&nbt, ALLOWLIST_MODULE),
+            &data,
+            "0123456789abcdef0123456789abcdef"
+        ));
+        assert!(!is_allowed(
+            has_module(&nbt, ALLOWLIST_MODULE),
+            &data,
+            "deadbeefdeadbeefdeadbeefdeadbeef"
+        ));
+        set_int(&mut nbt, KEY_ALLOWLIST, 1);
+        assert!(allowlist(&nbt).is_empty());
+    }
+
+    #[test]
+    fn both_installed_modules_drop() {
+        let mut nbt = Compound::new();
+        add_module(&mut nbt, HARMING_MODULE);
+        add_module(&mut nbt, ALLOWLIST_MODULE);
+        assert_eq!(
+            dropped_module_ids(&modules(&nbt)),
+            vec![HARMING_MODULE.to_owned(), ALLOWLIST_MODULE.to_owned()]
         );
     }
 

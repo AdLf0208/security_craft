@@ -4,6 +4,8 @@
     "block.securitycraft.iron_door_reinforced": "Reinforced Door",
     "itemGroup.securitycraft": "SecurityCraft",
     "item.securitycraft.harming_module": "Harming Module",
+    "item.securitycraft.allowlist_module": "Allowlist Module",
+    "module.securitycraft.keypad.allowlist_module.description": "Adding an allowlist module to a keypad will allow listed players to use the block without knowing the code.",
     "death.attack.securitycraft.incorrectPasscode": "%s entered an incorrect code",
     "death.attack.securitycraft.incorrectPasscode.player": "%1$s entered an incorrect code whilst fighting %2$s"
 }

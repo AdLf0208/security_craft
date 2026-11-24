@@ -45,7 +45,11 @@
 #     moves the owner: a stranger's click opens no set screen, a set screen that outlives
 #     an owner change stores nothing, the owner's set works, and a stranger's
 #     `/securitycraft code` is refused while the owner's code survives.
-# 14. RELAUNCH: the same world is quit and started again; the code stored before the
+# 14. ALLOWLIST: craft the jar's allowlist module, install it on a coded keypad, set the
+#     acting player with the harness command and click with nothing typed: the keypad
+#     powers and the adjacent door opens without a code screen. Swapping the player for
+#     a stranger makes the same click open a code screen and leave the door closed.
+# 15. RELAUNCH: the same world is quit and started again; the code stored before the
 #     restart still opens the same keypad and a wrong code is still refused, so the
 #     digest is recomputed from the saved salt rather than held in the session.
 #
@@ -54,7 +58,8 @@
 #   SELFTEST=harming tools/e2e.sh  # phase 12 expects the missing damage: exit 1
 #   SELFTEST=nonloot tools/e2e.sh  # phase 11b expects the module to have vanished: exit 1
 #   SELFTEST=owner tools/e2e.sh    # phase 13b expects the stranger's code stored: exit 1
-#   SELFTEST=relaunch tools/e2e.sh # phase 14 expects the stored digest lost: exit 1
+#   SELFTEST=relaunch tools/e2e.sh # phase 15 expects the stored digest lost: exit 1
+#   SELFTEST=allow tools/e2e.sh    # phase 14 expects an allowed click not to power: exit 1
 #   CONTROL=1 tools/e2e.sh     # no package at all: the ids must be unknown
 #   GAME=<an unmodified game> tools/e2e.sh   # the differential: the first phase fails
 #
@@ -188,6 +193,10 @@ click_keypad() { # X Y Z -> .screen
 # `/securitycraft owner` is the harness's way to put a stranger in front of a keypad:
 # a single player cannot become a second one.
 owner_cmd() { ctl chat "/securitycraft owner $1 $2 $3 $4" >/dev/null; ctl wait 4; }
+
+# `/securitycraft allow` sets the allowlist module's one player. A single-player harness
+# cannot become a second player, so `self` and `stranger` are the two sides of the check.
+allow_cmd() { ctl chat "/securitycraft allow $1 $2 $3 $4" >/dev/null; ctl wait 4; }
 
 cleanup() {
     local status=$?
@@ -715,7 +724,130 @@ ctl close >/dev/null 2>&1 || true
 ctl command "gamemode creative @s" >/dev/null
 ctl wait 4
 
-say "phase 14: a code set before a restart still opens the same keypad after it"
+say "phase 14: the allowlist module opens a coded keypad for a listed player without a code"
+# Upstream's `KeypadBlock.useWithoutItem` checks the allowlist after `verifyPasscodeSet`:
+# a listed player is activated (no code screen), while everyone else gets the code screen.
+# The module is carried from the jar (whitelist_module: III/IPI/ISI, iron + two paper),
+# the player list is set by the harness command (upstream's customize screen cannot be
+# driven headlessly), and both the activation and its refusal are read back in game.
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl wait 2
+ctl give minecraft:crafting_table 1 >/dev/null
+ctl give minecraft:iron_ingot 7 >/dev/null
+ctl give minecraft:paper 2 >/dev/null
+ctl wait 6
+ATABLE_X=$((PX-6)); ATABLE_Z=$((PZ+6))
+ctl tp "$(( ATABLE_X + 1 )).5" 101 "$(( ATABLE_Z + 2 )).5" >/dev/null
+ctl wait 6
+ctl look 180 0
+ctl select minecraft:crafting_table >/dev/null
+ctl place "$ATABLE_X" 101 "$ATABLE_Z" >/dev/null || fail "the allowlist crafting table did not place"
+ctl wait 4
+open_screen_table "$ATABLE_X" "$ATABLE_Z"
+for cell in 100 101 102 103 105 106 108; do grid_put_one minecraft:iron_ingot "$cell"; done
+grid_put_one minecraft:paper 104
+grid_put_one minecraft:paper 107
+ctl wait 4
+result=$(ctl screen | jq -r '[.slots[]? | select(.slot == 200) | .item][0] // "empty"')
+echo "allowlist recipe result: $result"
+[ "$result" = securitycraft:allowlist_module ] || fail "the allowlist module recipe produced '$result'"
+ctl click-slot 200 shift >/dev/null || fail "cannot take the crafted allowlist module"
+ctl wait 4
+left=$(ctl screen | jq -r '[.slots[]? | select(.slot >= 100 and .slot <= 108 and .item != null)] | length')
+echo "allowlist grid slots still holding an item: $left"
+[ "$left" = 0 ] || fail "the allowlist recipe did not consume its ingredients ($left grid slots filled)"
+held=$(inv_slot_of securitycraft:allowlist_module)
+echo "allowlist module in inventory slot: ${held:-none}"
+[ -n "$held" ] || fail "the crafted allowlist module is not in the inventory"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4
+
+ALLOW_DOOR_X=$((PX-1)); ALLOW_DOOR_Z=$((PZ+4))
+ALLOW_KEY_X=$((PX-2)); ALLOW_KEY_Y=101; ALLOW_KEY_Z=$((PZ+4))
+ctl give "$DOOR" 1 >/dev/null
+ctl give securitycraft:keypad_item 1 >/dev/null
+ctl wait 6
+ctl tp "$(( ALLOW_DOOR_X + 1 )).5" 101 "$(( ALLOW_DOOR_Z + 2 )).5" >/dev/null
+ctl wait 4
+ctl look 180 0
+ctl select "$DOOR" >/dev/null
+ctl place "$ALLOW_DOOR_X" 101 "$ALLOW_DOOR_Z" >/dev/null || fail "the allowlist door did not place"
+ctl wait 4
+block_name "$ALLOW_DOOR_X" 101 "$ALLOW_DOOR_Z" | grep -qx "$DOOR" || fail "no allowlist door at $ALLOW_DOOR_X,101,$ALLOW_DOOR_Z"
+[ "$(door_open "$ALLOW_DOOR_X" 101 "$ALLOW_DOOR_Z")" = false ] || fail "the allowlist door started open"
+ctl tp "$(( ALLOW_KEY_X + 1 )).5" 101 "$(( ALLOW_KEY_Z + 2 )).5" >/dev/null
+ctl wait 4
+ctl select securitycraft:keypad_item >/dev/null
+ctl place "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z" >/dev/null || fail "the allowlist keypad did not place"
+ctl wait 4
+block_name "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z" | grep -qx "$KEYPAD" || fail "no allowlist keypad"
+code_cmd "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z" 1234
+line=$(info "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z")
+echo "coded allowlist keypad: $line"
+[ "$(field code "$line")" = set ] || fail "the allowlist keypad has no code: $line"
+[ "$(field modules "$line")" = none ] || fail "the allowlist keypad already has a module: $line"
+
+ctl select securitycraft:allowlist_module >/dev/null
+ctl tp "$(( ALLOW_KEY_X + 1 )).5" 101 "$(( ALLOW_KEY_Z + 2 )).5" >/dev/null
+ctl wait 4
+ctl look 180 0
+ctl look-at block "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z" south >/dev/null 2>&1 || true
+ctl interact "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z" south >/dev/null || fail "the keypad did not take the allowlist module"
+ctl wait 6
+line=$(info "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z")
+echo "after installing the allowlist module: $line"
+[ "$(field modules "$line")" = allowlist ] || fail "the allowlist module was not installed: $line"
+[ "$(field code "$line")" = set ] || fail "installing the allowlist module lost the code: $line"
+[ "$(field allow "$line")" = 0 ] || fail "a fresh allowlist module already has players: $line"
+
+allow_cmd "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z" self
+line=$(info "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z")
+echo "after adding the acting player: $line"
+[ "$(field allow "$line")" = 1 ] || fail "the acting player was not added to the allowlist: $line"
+# The click must activate directly: no code screen is opened and nothing is typed.
+ctl close >/dev/null 2>&1 || true
+ctl tp "$(( ALLOW_KEY_X + 1 )).5" 101 "$(( ALLOW_KEY_Z + 2 )).5" >/dev/null
+ctl wait 6
+ctl command "clear" >/dev/null
+ctl wait 2
+ctl look 180 0
+ctl look-at block "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z" south >/dev/null 2>&1 || true
+ctl interact "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z" south >/dev/null || fail "the keypad did not accept the allowed click"
+ctl wait 6
+screen=$(ctl screen | jq -r '.screen')
+line=$(info "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z")
+echo "allowed click with nothing typed: screen=$screen $line"
+[ "$screen" = playing ] || fail "the allowed click opened a code screen: $screen"
+[ "$(field powered "$line")" = true ] || fail "the allowed click did not power the keypad: $line"
+[ "$(field signal "$line")" -gt 0 ] || fail "the allowed click did not start a signal: $line"
+[ "$(door_open "$ALLOW_DOOR_X" 101 "$ALLOW_DOOR_Z")" = true ] || fail "the allowed click did not open the door beside it"
+if [ "$SELFTEST" = allow ]; then
+    # Fail-capability: invert the branch — an allowed click must NOT power the keypad.
+    [ "$(field powered "$line")" = false ] \
+        || fail "SELFTEST: expected an allowed click not to power the keypad"
+fi
+
+# The differential: swap the acting player for a stranger. The same click now
+# reaches the ordinary code screen and leaves the door closed.
+ctl wait 70
+line=$(info "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z")
+echo "after the allowlist signal: $line"
+[ "$(field powered "$line")" = false ] || fail "the allowlist keypad stayed powered: $line"
+[ "$(door_open "$ALLOW_DOOR_X" 101 "$ALLOW_DOOR_Z")" = false ] || fail "the allowlist door stayed open"
+allow_cmd "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z" stranger
+line=$(info "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z")
+echo "after adding a stranger: $line"
+[ "$(field allow "$line")" = 1 ] || fail "the allowlist did not swap to the stranger: $line"
+screen=$(click_keypad "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z")
+line=$(info "$ALLOW_KEY_X" "$ALLOW_KEY_Y" "$ALLOW_KEY_Z")
+echo "non-listed click: screen=$screen $line"
+[ "$screen" = container ] || fail "a non-listed player did not get the code screen: $screen"
+[ "$(field powered "$line")" = false ] || fail "a non-listed click powered the keypad: $line"
+[ "$(door_open "$ALLOW_DOOR_X" 101 "$ALLOW_DOOR_Z")" = false ] || fail "a non-listed click opened the door"
+ctl close >/dev/null 2>&1 || true
+
+say "phase 15: a code set before a restart still opens the same keypad after it"
 # The digest is salted SHA-256 over data the keypad saved, so a restart re-reads the
 # same salt and the same digest from the block entity and must recompute a match. A
 # digest that only worked in the session that stored it would pass every phase above
@@ -751,5 +883,5 @@ echo "the right code after the relaunch: $line"
 [ "$(door_open "$DOOR_X" 101 "$DOOR_Z")" = true ] || fail "the keypad's signal after the relaunch did not open the door"
 ctl close >/dev/null 2>&1 || true
 
-echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes rate-limited a correct one; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke — and survived a level-side /setblock removal as a dropped item; a keypad without the module did not hurt a wrong code; and only the owner may set a keypad's first code — a stranger's click opened no set screen, a set screen that outlived an owner change stored nothing, the owner set it, and a stranger's /securitycraft code was refused; and after quitting and relaunching the same world the code stored before the restart still opens the keypad and a wrong code is still refused"
+echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes rate-limited a correct one; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke — and survived a level-side /setblock removal as a dropped item; a keypad without the module did not hurt a wrong code; and only the owner may set a keypad's first code — a stranger's click opened no set screen, a set screen that outlived an owner change stored nothing, the owner set it, and a stranger's /securitycraft code was refused; the allowlist module crafted from seven iron and two paper was installed on a coded keypad and an allowed click with nothing typed powered it and opened its door without a code screen, while swapping the player for a stranger restored the code screen and left the door closed; and after quitting and relaunching the same world the code stored before the restart still opens the keypad and a wrong code is still refused"
 # The cleanup trap prints the run's exit status as the last line.

@@ -92,6 +92,74 @@ pub fn wrong_code_damage(harming: bool) -> Option<f32> {
     harming.then_some(INCORRECT_PASSCODE_DAMAGE)
 }
 
+/// The most players a list module carries (upstream `ListModuleData.MAX_PLAYERS`).
+pub const MAX_LIST_PLAYERS: usize = 50;
+
+/// The customizable data of a list module: the players on it and whether it affects
+/// everyone. Upstream's `ListModuleData` also carries a team list; this slice has no
+/// team surface in the SDK, so that field is not carried (recorded as a deviation).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ListData {
+    players: Vec<String>,
+    affect_everyone: bool,
+}
+
+impl ListData {
+    /// An empty list, as a freshly crafted module carries.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a player, up to [`MAX_LIST_PLAYERS`], without duplicating a name.
+    #[must_use]
+    pub fn with_player(mut self, player: &str) -> Self {
+        if self.players.len() >= MAX_LIST_PLAYERS || self.contains(player) {
+            return self;
+        }
+        self.players.push(player.to_owned());
+        self
+    }
+
+    /// Sets whether everyone is affected, as upstream's `updateAffectEveryone`.
+    #[must_use]
+    pub fn affecting_everyone(mut self, affects: bool) -> Self {
+        self.affect_everyone = affects;
+        self
+    }
+
+    /// The players on the list, in insertion order.
+    #[must_use]
+    pub fn players(&self) -> &[String] {
+        &self.players
+    }
+
+    /// Whether this list affects everyone rather than just the named players.
+    #[must_use]
+    pub fn affects_everyone(&self) -> bool {
+        self.affect_everyone
+    }
+
+    /// Whether `player` is on the list, compared case-insensitively as upstream's
+    /// `ListModuleData.isPlayerOnList` does.
+    #[must_use]
+    pub fn contains(&self, player: &str) -> bool {
+        self.players
+            .iter()
+            .any(|listed| listed.eq_ignore_ascii_case(player))
+    }
+}
+
+/// Whether an allowlist module opens the keypad for `player` without a code.
+///
+/// Upstream's `IModuleInventory.isAllowed`: a keypad without the module allows
+/// nobody; with one, a listed player (or everyone, when the list is set that way)
+/// is allowed and `KeypadBlock.useWithoutItem` calls `activate` without a code.
+#[must_use]
+pub fn is_allowed(installed: bool, data: &ListData, player: &str) -> bool {
+    installed && (data.affects_everyone() || data.contains(player))
+}
+
 /// The key a menu-button id stands for, `None` for an id the screen never
 /// sends.
 #[must_use]
@@ -875,6 +943,51 @@ mod tests {
         assert!(
             !may_install(None, 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef),
             "an unowned keypad (old save, dispenser) installs nothing"
+        );
+    }
+
+    #[test]
+    fn an_allowed_player_activates_without_a_code() {
+        let list = ListData::new().with_player("Alice");
+        assert!(
+            is_allowed(true, &list, "alice"),
+            "a listed player is allowed without typing a code"
+        );
+        assert!(
+            !is_allowed(true, &list, "stranger"),
+            "a player who is not on the list still needs the code"
+        );
+        assert!(
+            !is_allowed(false, &list, "alice"),
+            "without the module the list grants nothing"
+        );
+        assert!(
+            is_allowed(true, &ListData::new().affecting_everyone(true), "anyone"),
+            "a list set to affect everyone allows a player who is not named"
+        );
+    }
+
+    #[test]
+    fn the_allowlist_is_bounded_and_case_insensitive() {
+        let mut list = ListData::new();
+        for index in 0..MAX_LIST_PLAYERS {
+            list = list.with_player(&format!("player{index}"));
+        }
+        list = list.with_player("one-too-many");
+        assert!(
+            !list.contains("one-too-many"),
+            "the list holds at most MAX_LIST_PLAYERS players"
+        );
+        assert!(
+            list.contains("PLAYER49"),
+            "upstream compares player names case-insensitively"
+        );
+        assert!(
+            ListData::new()
+                .with_player("alice")
+                .with_player("alice")
+                .contains("alice"),
+            "adding the same player twice keeps one entry"
         );
     }
 
