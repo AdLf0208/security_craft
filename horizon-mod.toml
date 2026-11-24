@@ -1,6 +1,6 @@
 id = "securitycraft"
 name = "SecurityCraft"
-version = "0.2.13"
+version = "0.2.14"
 description = """SecurityCraft's keypad and reinforced door: a keypad stores a salted digest of a typed code,
 asks for it on a drawn panel of keys and, on a match, powers itself for three seconds; a reinforced
 door beside it opens on that redstone signal and closes when it runs out. The keypad's placer is its
@@ -12,6 +12,8 @@ The passcode-protected barrel keeps a saved code and salt and opens its 27-slot 
 for its owner after the right code. The passcode-protected smoker cooks food against the game's own
 smoking recipes with the same three-slot container and code gate. The passcode trapdoor is a carried
 iron trapdoor whose owner's correct code flips its `open` state and whose scheduled tick closes it.
+The passcode door is the matching double-high carried iron door: its owner's correct code flips
+`open` on both halves and the scheduled tick closes them both.
 The cameras, the mines and the lasers are not ported yet."""
 authors = ["Geforce, bl4ckscor3, Redstone_Dubstep, and ChainmailPickaxe", "AdLf0208"]
 # A native mod: Rust in src/, compiled by the launcher against the game build [native] pins,

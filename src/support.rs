@@ -35,9 +35,9 @@ use crate::runtime::{
     Action, Button, CookKind, DEFAULT_SIGNAL_TICKS, Entry, FURNACE_FUEL, FURNACE_INPUT,
     FURNACE_OUTPUT, FURNACE_SLOTS, FurnaceState, FurnaceTick, ListData, Mode, Throttle,
     TrapdoorChange, after_submit, button, container_access, cooldown_allows, cooldown_failed,
-    disguise_tint, facing_from_yaw, furnace_access, furnace_tick, hash_code, is_allowed, is_denied,
-    may_install, may_set_code, new_salt, tick_signal, trapdoor_access, trapdoor_tick, valid_code,
-    wrong_code_damage,
+    disguise_tint, door_access, door_halves, door_tick, facing_from_yaw, furnace_access,
+    furnace_tick, hash_code, is_allowed, is_denied, may_install, may_set_code, new_salt,
+    tick_signal, trapdoor_access, trapdoor_tick, valid_code, wrong_code_damage,
 };
 
 /// The keypad block; its item (`securitycraft:keypad_item`) places it.
@@ -68,6 +68,11 @@ pub(crate) const SMOKER_MENU: &str = "securitycraft:keypad_smoker";
 pub(crate) const TRAPDOOR: &str = "securitycraft:keypad_trapdoor";
 /// The block entity type of the passcode trapdoor.
 pub(crate) const TRAPDOOR_ENTITY: &str = "keypad_trapdoor";
+/// The passcode door (`securitycraft:keypad_door`), carried as a
+/// `minecraft:iron_door` template with a saved owner/code and a two-half `open` flip.
+pub(crate) const KEYPAD_DOOR: &str = "securitycraft:keypad_door";
+/// The block entity type of the passcode door.
+pub(crate) const KEYPAD_DOOR_ENTITY: &str = "keypad_door";
 /// The vanilla 9×3 menu the barrel's 27 slots open, so hoppers, comparators,
 /// shift-clicks and a relaunch use the game's own container paths.
 pub(crate) const CONTAINER_MENU: &str = "securitycraft:keypad_barrel";
@@ -108,6 +113,10 @@ const KEY_MODULES: &str = "modules";
 const KEY_ALLOWLIST: &str = "allowlist";
 /// The players on the denylist module, as 32-hex UUIDs (same harness spelling).
 const KEY_DENYLIST: &str = "denylist";
+/// The other half of a double-high passcode door, saved as `x,y,z` when a right
+/// code opens it so the scheduled tick can close both halves without a level
+/// lookup (`block_entity_tick` has no read-only level in its event).
+const KEY_OTHER_HALF: &str = "other_half";
 
 /// The harming module's item id.
 pub(crate) const HARMING_MODULE: &str = "securitycraft:harming_module";
@@ -587,6 +596,47 @@ pub(crate) fn on_trapdoor_tick(host: &mut dyn ServerHost, event: &mut BlockEntit
 /// drawn panel). Letting the carried template handle the click is faithful:
 /// a vanilla iron trapdoor also ignores a hand click.
 pub(crate) fn on_trapdoor_use(
+    host: &mut dyn ServerHost,
+    click: &mod_api::BlockClick<'_>,
+) -> Option<InteractionResult> {
+    let level = in_place_level(host)?;
+    if level.block_property(&*host, click.pos, "open").as_deref() == Some("true") {
+        return Some(InteractionResult::Pass);
+    }
+    None
+}
+
+/// One passcode-door tick: the saved countdown reaches zero and both halves of
+/// the double-high block are closed. The other half's position was saved when the
+/// right code opened it (`block_entity_tick` has no level to read `half` from).
+pub(crate) fn on_door_tick(host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
+    let pos = event.pos;
+    let fields = &mut *event.entity;
+    let signal = int(&fields.nbt, KEY_SIGNAL);
+    if signal <= 0 {
+        return;
+    }
+    let other = string(&fields.nbt, KEY_OTHER_HALF);
+    let (next, closes) = door_tick(signal);
+    set_int(&mut fields.nbt, KEY_SIGNAL, next);
+    if closes {
+        set_int(&mut fields.nbt, KEY_OPEN, 0);
+        host.set_block_property(pos, "open", "false");
+        if let Some(parts) = other
+            && let [x, y, z] = parts
+                .split(',')
+                .filter_map(|n| n.parse::<i32>().ok())
+                .collect::<Vec<_>>()[..]
+        {
+            host.set_block_property([x, y, z], "open", "false");
+        }
+    }
+}
+
+/// A right click on the passcode door. An already-open door answers `PASS`
+/// (upstream's `useWithoutItem`); an iron door never opens by hand, so letting
+/// the carried template handle the rest is faithful.
+pub(crate) fn on_door_use(
     host: &mut dyn ServerHost,
     click: &mod_api::BlockClick<'_>,
 ) -> Option<InteractionResult> {
@@ -1526,6 +1576,7 @@ fn passcode_label(block: &str) -> Option<&'static str> {
         FURNACE => Some("furnace"),
         SMOKER => Some("smoker"),
         TRAPDOOR => Some("trapdoor"),
+        KEYPAD_DOOR => Some("door"),
         _ => None,
     }
 }
@@ -1617,6 +1668,42 @@ fn unlock_container(
                 });
             }
         }
+    } else if block == KEYPAD_DOOR {
+        match door_access(
+            owner_of(&data),
+            asking.unwrap_or(0),
+            stored.as_deref(),
+            &salt,
+            code,
+            DEFAULT_SIGNAL_TICKS,
+        ) {
+            TrapdoorChange::Opened(ticks) => {
+                set_int(&mut data, KEY_SIGNAL, ticks);
+                // Upstream's `activate` cycles `open` on both halves of the
+                // double-high door. Save the other half so the tick closes both.
+                let half = level
+                    .block_property(&*host, pos, "half")
+                    .unwrap_or_else(|| "lower".to_owned());
+                let (lower, upper) = door_halves(pos, &half);
+                let other = if lower == pos { upper } else { lower };
+                set_string(
+                    &mut data,
+                    KEY_OTHER_HALF,
+                    &format!("{},{},{}", other[0], other[1], other[2]),
+                );
+                host.set_block_property(lower, "open", "true");
+                host.set_block_property(upper, "open", "true");
+            }
+            TrapdoorChange::Unchanged => {
+                return Err(if owner_of(&data) != asking {
+                    format!("Only the {label}'s owner may enter its code.")
+                } else if stored.is_none() {
+                    format!("The {label} has no code set.")
+                } else {
+                    "Wrong code.".to_owned()
+                });
+            }
+        }
     } else if block == FURNACE || block == SMOKER {
         if !furnace_access(
             owner_of(&data),
@@ -1691,20 +1778,22 @@ fn container_info(host: &dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Opti
     ))
 }
 
-/// `/securitycraft cinfo <pos>` for a passcode trapdoor: the `open` it reports is
-/// the block's own state, read back from the game, not the command's answer. A
-/// harness addition, like every other passcode readout in this port.
-fn trapdoor_info(host: &dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Option<String> {
-    if block_at(host, level, pos) != TRAPDOOR {
+/// `/securitycraft cinfo <pos>` for a passcode trapdoor or door: the `open` it
+/// reports is the block's own state, read back from the game, not the command's
+/// answer. A harness addition, like every other passcode readout in this port.
+fn gate_info(host: &dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Option<String> {
+    let block = block_at(host, level, pos);
+    if block != TRAPDOOR && block != KEYPAD_DOOR {
         return None;
     }
+    let label = passcode_label(&block)?;
     let entity = host.block_entity(level, pos)?;
     let data = entity.data(host)?;
     let open = level
         .block_property(host, pos, "open")
         .unwrap_or_else(|| "unknown".to_owned());
     Some(format!(
-        "securitycraft trapdoor {} {} {} code={} open={} owner={} signal={}",
+        "securitycraft {label} {} {} {} code={} open={} owner={} signal={}",
         pos[0],
         pos[1],
         pos[2],
@@ -2218,8 +2307,9 @@ pub(crate) fn command(
                 .find(|level| level.dimension() == invocation.dimension)?;
             match literals[1] {
                 "cinfo" => {
-                    if block_at(host, level, pos) == TRAPDOOR {
-                        trapdoor_info(host, level, pos)
+                    let block = block_at(host, level, pos);
+                    if block == TRAPDOOR || block == KEYPAD_DOOR {
+                        gate_info(host, level, pos)
                     } else {
                         container_info(host, level, pos)
                     }
@@ -2548,6 +2638,14 @@ mod tests {
             Some("barrel"),
             "the other passcode families keep their labels"
         );
+    }
+
+    #[test]
+    fn the_passcode_door_has_its_own_id_and_readout_label() {
+        assert_eq!(KEYPAD_DOOR, "securitycraft:keypad_door");
+        assert_eq!(KEYPAD_DOOR_ENTITY, "keypad_door");
+        assert_eq!(passcode_label(KEYPAD_DOOR), Some("door"));
+        assert_eq!(passcode_label(TRAPDOOR), Some("trapdoor"));
     }
 
     #[test]

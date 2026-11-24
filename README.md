@@ -1,11 +1,11 @@
-# SecurityCraft (keypad, reinforced door, passcode barrel/furnace/smoker/trapdoor and the five modules) — Horizon native mod
+# SecurityCraft (keypad, reinforced door, passcode barrel/furnace/smoker/trapdoor/door and the five modules) — Horizon native mod
 
 The SecurityCraft port for **Horizon**, as a flat SDK package: mod API **0.2**, built
 against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`.
 
 - **`horizon-mod.toml`** — the only manifest and the only identity
-  (`id = "securitycraft"`, `version = "0.2.13"`, `side = "both"`, `[native]` pins).
+  (`id = "securitycraft"`, `version = "0.2.14"`, `side = "both"`, `[native]` pins).
 - **`src/runtime.rs`** — the pure rules (code shape, salted digest, verdict, entry,
   mode, signal countdown, who may set a code or install a module, the allowlist's and
   denylist's listed players, the wrong-code damage, the smart-module retry gate and the
@@ -23,7 +23,8 @@ against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
   cooldown, the passcode containers' code-set/unlock/readout and one-shot open gate, the
   passcode furnace's smelting tick and the smoker's smoking tick (fuel, cook time and `lit`,
   against the game's own recipe table), the passcode trapdoor's code-gated `open` flip and its
-  closing countdown, the module drop and the harness commands.
+  closing countdown, the passcode door's two-half `open` flip and countdown, the module drop and
+  the harness commands.
 - **`src/lib.rs`** — the one `impl mod_api::Hooks`, the keypad's, the passcode barrel's,
   the passcode furnace's and the passcode smoker's Parts, and their items' Parts (which record
   the owner).
@@ -45,7 +46,10 @@ against Horizon `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
   `keypad_smoker_*` models and window texture, cooked against `minecraft:smoking`), and the
   passcode trapdoor (`securitycraft:keypad_trapdoor`, the jar's 16-state blockstate, three static
   block models and texture on a `minecraft:iron_trapdoor` template; `open` flips only for the
-  owner's right code and closes on the scheduled tick).
+  owner's right code and closes on the scheduled tick), and the passcode door
+  (`securitycraft:keypad_door`, the jar's 32-state blockstate and eight static models on a
+  `minecraft:iron_door` template; the owner's right code flips `open` on both halves and the
+  scheduled tick closes them both).
 - **`securitycraft.hmod`** — the delivered package (built by
   `cargo horizon-mod build`, copied out of `target/`). Its only dependency is the SDK's
   `horizon-mod-api`, so it **packs no `Cargo.lock`**: R10 accepts a lock only as the
@@ -95,7 +99,8 @@ relaunch, against unprotected vanilla containers), and a quit-and-relaunch leg w
 before the restart still opens the keypad).
 `SELFTEST=1`, `SELFTEST=harming`, `SELFTEST=nonloot`, `SELFTEST=owner`, `SELFTEST=allow`,
 `SELFTEST=deny`, `SELFTEST=smart`, `SELFTEST=disguise`, `SELFTEST=container`,
-`SELFTEST=furnace`, `SELFTEST=smoker` and `SELFTEST=keypad-trapdoor` prove the
+`SELFTEST=furnace`, `SELFTEST=smoker`, `SELFTEST=keypad-trapdoor` and
+`SELFTEST=keypad-door-full` prove the
 assertions can fail, and
 `GAME=$CONTROL_GAME` runs the same scenario on an unmodified game, which fails at the
 first mod id. The evidence is under `ports/_shared/evidence/securitycraft-e2e/`.

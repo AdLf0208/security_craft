@@ -2946,3 +2946,177 @@ redstone with no code (differential). `SELFTEST=keypad-door-full` must invert th
 assertion and end `EXIT:1` (the existing `keypad-door` name is taken by the trapdoor alias). The
 universal block modifier and the reinforced-block family stay behind it; the chest remains
 `blocked(register_block_entity_renderers)` until the pin stamps a block-entity renderer surface.
+
+## Slice 14 — the full keypad door (2026-11-24, SDK `0a875da`) — 0.2.14
+
+**Slice and gap line.** The verbatim `## Next slice` above: *"the keypad door
+(`securitycraft:keypad_door`), the other half of the same gap line … now that the trapdoor is
+proved"*. Class **content**, tier **deep** in the ledger; the delivered shape is the port's
+existing **logic + machines** half (a block with saved owner/code, a code-gated two-half `open`
+flip and a closing tick) plus one carried double-high block — no menu, renderer or new hook kind.
+The chest stays `blocked(register_block_entity_renderers)` (slice 10, measured); it was not retried.
+
+**Inventory gate first (the brief's stop condition).**
+Evidence: [`slice13-keypad-door-full-inventory.log`](../../_shared/evidence/securitycraft/slice13-keypad-door-full-inventory.log).
+All eight jar door models (`keypad_door_{bottom,top}_{left,right}{,_open}`) and the item model are
+static JSON meshes parented to vanilla `block/door_*`; **not one is `builtin/entity`**. The jar's
+blockstate has exactly the 32 `facing`(4) × `half`(2) × `hinge`(2) × `open`(2) variants of 26.3's
+`iron_door`, and its two block textures (539 B lower, 411 B upper — the latter already carried by
+the reinforced door) exist in the prepared 26.3 root. No renderer is needed and no property is
+inexpressible → **no `blocked` symbol**. The eight models, the blockstate and the two textures were
+extracted byte-for-byte from the jar (SHA-1 `8760079e…3251`).
+
+**Red proof (TDD, before the rule existed).** `src/runtime.rs` gained `door_halves`, `door_access`
+and `door_tick` with stubs that kept the old behaviour, and two tests first. Forwarded
+`cargo test --offline` ([`slice13-red.log`](../../_shared/evidence/securitycraft/slice13-red.log)):
+
+```
+---- runtime::tests::a_right_code_opens_both_halves_of_a_passcode_door stdout ----
+
+thread 'runtime::tests::a_right_code_opens_both_halves_of_a_passcode_door' (1311098) panicked at src/runtime.rs:954:9:
+assertion `left == right` failed: the owner's right code opens the double-high door for signalLength ticks
+  left: Unchanged
+ right: Opened(60)
+
+---- runtime::tests::a_door_closes_when_its_signal_elapses stdout ----
+
+thread 'runtime::tests::a_door_closes_when_its_signal_elapses' (1311088) panicked at src/runtime.rs:992:9:
+assertion `left == right` failed
+  left: (2, false)
+ right: (1, false)
+
+test result: FAILED. 64 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+The rules became the proved `trapdoor_access`/`trapdoor_tick` verdicts reached through the new
+names, plus `door_halves(pos, half)` normalised to `(lower, upper)`; a glue test
+`the_passcode_door_has_its_own_id_and_readout_label` pins the id and label. **67** tests pass.
+
+### What the slice implements
+
+- **Pure rules** (`runtime::door_halves`, `door_access`, `door_tick`): the owner-then-salted-SHA-256
+  verdict and the 60-tick countdown of the trapdoor slice, with the double-high position rule new
+  to this slice. No SDK types in `runtime.rs`.
+- **Content**: `securitycraft:keypad_door` — the jar's block/item ids, byte-for-byte 32-state
+  blockstate, eight block models, item model and 539-byte texture, simplified lower-half loot,
+  lang and creative-tab entry, pickaxe tag, and a `minecraft:iron_door` template with the jar's
+  hardness, metal sounds and tool rule.
+- **The gate** (`support::unlock_container`): `/securitycraft copen` calls `door_access`; only the
+  owner's matching digest saves the countdown and sets `open=true` on **both** halves, saving the
+  other half's `x,y,z` in the block entity because `block_entity_tick` has no level to read `half`.
+  A wrong code writes nothing, so `ctl block` still reads `open=false`.
+- **The close tick** (`support::on_door_tick`): when the saved 60 ticks elapse it clears `open` on
+  both halves and the one-shot permission, as upstream's scheduled block tick does.
+- **Right click** (`support::on_door_use`): an open door answers `PASS`; an iron door never opens
+  by hand, so the carried template handles the rest.
+- **Readout**: `/securitycraft cinfo` now labels the new id `securitycraft door …`; the trapdoor's
+  readout is unchanged (`securitycraft trapdoor …`). Harness addition, like every other gate.
+
+### Verification (0.2.14, SDK `0a875da`, 2026-11-24)
+
+Every Rust step ran through **forwarded** `build-slot.sh` leases on `AdLf-PC`
+(`build-slot: forwarding … to the remote runner`, relative `--port ports/securitycraft`,
+`CARGO_INCREMENTAL=0`, **no `BUILD_LOCAL=1`**); the launcher build and the game legs stayed local
+(the e2e is `--offscreen`). Evidence under `../_shared/evidence/securitycraft/` and
+`../_shared/evidence/securitycraft-e2e/`.
+
+| Check | Evidence | Result |
+|---|---|---|
+| Inventory gate | `slice13-keypad-door-full-inventory.log` | 8 models `CLEAN`; jar props = 26.3 props; no renderer |
+| Red | `slice13-red.log` | **64 passed / 2 failed**, both new assertions (`Unchanged`/`Opened(60)`, `(2,false)`/`(1,false)`) |
+| Tests | `slice13-test.log`, `sdk-test.log` (regenerated on the final 0.2.14 tree) | **67 passed**, 0 failed |
+| Format + lints | `slice13-lint.log` | fmt clean, clippy exit 0, **0 warnings** |
+| Two builds + `cmp` | `slice13-build.log`, `slice13-build-cmp.log` | **byte-identical**; `rm -f Cargo.lock` before each |
+| Delivered | `securitycraft.hmod` | **113,206 B**, SHA-256 `fd39a05a0058ee0a3f11c6ba7c78f3523f16ccb333bd298e4092ce980cfb8a56`, **130 entries**, no `Cargo.lock`, version 0.2.14 |
+| Registry check | `slice13-check-fits.log` | `securitycraft 0.2.14 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, same SHA, EXIT 0 |
+| `fits --build 0a875da` | `slice13-check-fits.log` | `0a875da  made for`, EXIT 0 |
+| `fits --build 0b14f8a` | `slice13-check-fits.log` | `0b14f8a  fits`, EXIT 0, same SHA |
+| Gate | `slice13-verify-sdk-package.log` | **1/1**, `package matches the tree`, SDK-only deps (R9), no lock, 67 tests |
+| Launcher build | `slice13-launcher-build.log` | stale native tag moved aside, `Compiling securitycraft (1 of 1)`, `native-0a875da-d7ae016d6da7 built` |
+| In-game PASS | `securitycraft-e2e/e2e-launcher.log` | **PASS + `EXIT:0`**, all 23 phases incl. phase 23 |
+| Control (unmodified Nightly) | `e2e-control.log` | **`EXIT:1`** at phase 1 |
+| Ids-unknown control | `e2e-ids-unknown.log` | PASS + `EXIT:0`, ids unknown |
+| SELFTEST (full door) | `e2e-selftest-keypad-door-full.log` | **`EXIT:1`** at phase 23, "expected the door OPEN after a wrong code" |
+| Prior SELFTESTs (`1`/harming/nonloot/owner/relaunch/allow/deny/smart/disguise/container/furnace/smoker/keypad-trapdoor/keypad-door) | `e2e-selftest*.log` | **`EXIT:1`** at each own assertion (all re-run against 0.2.14) |
+| Log checker | `slice13-check-e2e-logs.log` | `logs=36 ok=36`, exit 0 |
+| Recipe types | `slice13-check-recipe-types.log` | `securitycraft: ok`, exit 0 |
+
+Phase 23 in the PASS leg (`e2e-launcher.log`):
+
+```
+vanilla iron door on redstone: minecraft:iron_door[facing=east,half=lower,hinge=left,open=true,powered=true]
+door after place: lower=securitycraft:keypad_door[facing=south,half=lower,hinge=right,open=false,powered=false] upper=securitycraft:keypad_door[facing=south,half=upper,hinge=right,open=false,powered=false]
+securitycraft door 19 101 10 code=set open=false owner=set signal=0
+door halves after a wrong code: lower=false upper=false
+door halves after the right code: lower=true upper=true
+securitycraft door 19 101 10 code=set open=true owner=set signal=56
+door halves after its signal: lower=false upper=false
+PASS-keypad-door: the passcode door saved its owner and code, a wrong code left both halves open=false, the owner's right code flipped both halves to open=true, and its scheduled tick closed them both; a vanilla iron door beside it opened on redstone with no code
+```
+
+Every assertion is on a parsed `ctl block` state of **both** halves; `SELFTEST=keypad-door-full`
+inverts the wrong-code/closed assertion and fails exactly there. `ctl messages` stays at **8**.
+Pre-existing placement flakes at phases 14/17 stopped several legs before their own assertions;
+each identical leg was retried unchanged and the flake logs are kept
+(`e2e-selftest-keypad-door-full-flake-17.log`, `e2e-selftest-allow-flake-1.log`,
+`e2e-selftest-disguise-flake-1.log`, `e2e-selftest-furnace-flake-1.log`,
+`e2e-selftest-keypad-door-flake-{1,2,3,4}.log`) — none is called green.
+
+### Coverage added by this slice
+
+| Family | Status |
+|---|---|
+| `securitycraft:keypad_door` block/item (give, place, read both halves back) | **tested** — phase 23: both `block_name`s and parsed `block_state`s |
+| owner recorded on placement, first code saved | **tested** — phase 23: `owner=set`, `code=set` |
+| wrong code → both halves `open=false` | **tested** — phase 23: parsed states; inverted by `SELFTEST=keypad-door-full` |
+| right code → both halves `open=true` | **tested** — phase 23: parsed states, readout `open=true` |
+| scheduled close after `signalLength` | **tested** — phase 23: both halves `open=false` after 90 ticks |
+| redstone differential (vanilla iron door opens, keypad door ignores redstone) | **tested** — phase 23: vanilla door `open=true` with no code |
+| artefact's `activate` on both halves | **unit test** `a_right_code_opens_both_halves_of_a_passcode_door` + both parsed states in game |
+| keypad chest | **`blocked(register_block_entity_renderers)`** — slice 10, unchanged |
+| universal block modifier, reinforced-block family, cameras/mines/lasers | **not ported** — remaining gap list |
+
+### Deviations recorded by this slice
+
+1. **The code check is a harness command** (`cset`/`copen`/`cinfo`), as for the barrel, furnace,
+   smoker and trapdoor; a headless harness cannot type into upstream's second drawn check panel.
+2. **`signalLength` is fixed at the upstream default 60** and not configurable; the saved countdown
+   lives on the block entity, so both halves still close after a relaunch.
+3. **The other half's position is saved in the block entity** (`other_half`) so a
+   `block_entity_tick` without a level can close both halves; no other save field changes.
+4. **The loot table is simplified** to a survives-explosion drop from the lower half only (the
+   jar's lower-half `block_state_property` condition is kept; the `copy_name` function is not).
+5. **No module inventory, disguise state, `open` sound or `disabled` option** on the door; as on
+   the other passcode blocks, modules install on keypads only.
+
+### Changelog for the resubmission (0.2.14)
+
+> Supersedes #1805→0.2.13 (the staged PR). Carries the jar's `keypad_door` (32-state blockstate,
+> eight static models, two textures and lang on a `minecraft:iron_door` template) as a double-high
+> passcode door: the placer owns it, only the owner may set the first code, a wrong `copen` leaves
+> both halves `open=false`, the right one flips both to `open=true`, and a saved 60-tick countdown
+> closes them — while a vanilla iron door opens on redstone with no code. New pure
+> `door_halves`/`door_access`/`door_tick` rules and their inverted in-game leg prove it. The salted
+> SHA-256, SDK-only dependency set, save format, deny-before-allow order, smart gate and disguise
+> render are unchanged.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-review, rust-port
+
+## Next slice
+
+**Family:** the **universal block modifier and the reinforced-block family**, the next line of the
+gap list (*"the universal block remover/reinforcer and the reinforced-block family"*) now that the
+keypad door and trapdoor are closed. It fits tier **deep** in the same logic+machines shape: a
+carried tool item (the jar's universal block remover/reinforcer) whose right-click converts a
+reinforced block to/from its vanilla counterpart, with the owner/code state carried over and an
+in-game differential (a vanilla block breaks normally; a reinforced one needs the tool). Before
+dispatch, inventory the jar's tool items and the reinforced family's blockstates/models for
+`builtin/entity` and confirm the 26.3 template names, stopping with `blocked(<symbol>)` if a
+renderer is needed. The **keypad chest** remains `blocked(register_block_entity_renderers)` until
+the pin stamps a block-entity renderer surface; cameras, mines and lasers stay behind this slice.
+
+**In-game assertion that would prove it:** give the carried remover, right-click a placed reinforced
+block and assert the block id changes to its vanilla counterpart while a plain vanilla block
+breaks unchanged under the same tool; `SELFTEST=universal` inverts the conversion assertion and
+ends `EXIT:1`. If the conversion cannot be expressed through the pin's block/item hooks without a
+renderer, stop with `blocked(<symbol>)` and evidence instead of inventing a fake tool.

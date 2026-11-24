@@ -87,6 +87,7 @@
 #   SELFTEST=smoker tools/e2e.sh   # phase 21 expects a wrong code to leave the smoker's slots: exit 1
 #   SELFTEST=keypad-trapdoor tools/e2e.sh  # phase 22 expects a wrong code to OPEN the trapdoor: exit 1
 #   (SELFTEST=keypad-door is the same inverted assertion, named for the whole door family)
+#   SELFTEST=keypad-door-full tools/e2e.sh # phase 23 expects a wrong code to OPEN the full door: exit 1
 #   CONTROL=1 tools/e2e.sh     # no package at all: the ids must be unknown
 #   GAME=<an unmodified game> tools/e2e.sh   # the differential: the first phase fails
 #
@@ -1720,6 +1721,91 @@ echo "$closed_trap_state" | grep -q 'open=false' \
 ctl close >/dev/null 2>&1 || true
 
 echo "PASS-trapdoor: the passcode trapdoor saved its owner and code, a wrong code left its block state open=false, the owner's right code flipped it to open=true, and its scheduled tick closed it again; a vanilla iron trapdoor beside it opened on redstone with no code"
+
+say "phase 23: the passcode door opens both halves only for its owner's code and closes on its tick"
+# The jar's keypad_door is carried as a minecraft:iron_door template: its 32
+# facing/half/hinge/open variants and eight static models match 26.3 exactly. Upstream's
+# KeypadDoorBlock gates on the saved owner/code, `activate` cycles OPEN on both halves and
+# schedules the off tick after signalLength (60). A vanilla iron door opens on redstone
+# with no code at all — the differential. Both halves are read back with `ctl block`.
+CURX=$(ctl state | jq -r '.player.position[0] | floor')
+CURZ=$(ctl state | jq -r '.player.position[2] | floor')
+DOORX=$((CURX+2)); DOORY=101; DOORZ=$((CURZ+2))
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl wait 2
+ctl give minecraft:iron_door 1 >/dev/null || fail "the game refused a vanilla iron door"
+ctl give securitycraft:keypad_door 1 >/dev/null || fail "the game refused securitycraft:keypad_door: the package is not loaded"
+ctl wait 6
+ctl close >/dev/null 2>&1 || true
+ctl wait 2 >/dev/null
+for y in "$DOORY" "$((DOORY+1))"; do ctl command "setblock $DOORX $y $DOORZ minecraft:air" >/dev/null; done
+ctl command "setblock $DOORX $((DOORY-1)) $DOORZ minecraft:stone" >/dev/null
+ctl wait 4
+
+# Differential: a vanilla iron door opens on a redstone signal with no code.
+ctl select minecraft:iron_door >/dev/null
+reply=$(ctl place "$DOORX" "$DOORY" "$DOORZ" 2>&1 || true)
+echo "vanilla iron door place reply: $reply"
+echo "$reply" | jq -e '.changed == true' >/dev/null || fail "the vanilla iron door did not place ($reply)"
+ctl wait 4
+ctl command "setblock $DOORX $((DOORY-1)) $DOORZ minecraft:redstone_block" >/dev/null
+ctl wait 10
+vanilla_door_state=$(block_state "$DOORX" "$DOORY" "$DOORZ")
+echo "vanilla iron door on redstone: $vanilla_door_state"
+[ "$(door_open "$DOORX" "$DOORY" "$DOORZ")" = true ] \
+    || fail "a vanilla iron door did not open on redstone ($vanilla_door_state)"
+ctl command "setblock $DOORX $((DOORY-1)) $DOORZ minecraft:air" >/dev/null
+for y in "$DOORY" "$((DOORY+1))"; do ctl command "setblock $DOORX $y $DOORZ minecraft:air" >/dev/null; done
+ctl command "setblock $DOORX $((DOORY-1)) $DOORZ minecraft:stone" >/dev/null
+ctl wait 4
+
+ctl select securitycraft:keypad_door >/dev/null
+reply=$(ctl place "$DOORX" "$DOORY" "$DOORZ" 2>&1 || true)
+echo "passcode door place reply: $reply"
+echo "$reply" | jq -e '.changed == true' >/dev/null || fail "the passcode door did not place ($reply)"
+ctl wait 4
+block_name "$DOORX" "$DOORY" "$DOORZ" | grep -qx securitycraft:keypad_door \
+    || fail "no passcode door lower half at $DOORX,$DOORY,$DOORZ"
+block_name "$DOORX" "$((DOORY+1))" "$DOORZ" | grep -qx securitycraft:keypad_door \
+    || fail "no passcode door upper half at $DOORX,$((DOORY+1)),$DOORZ"
+echo "door after place: lower=$(block_state "$DOORX" "$DOORY" "$DOORZ") upper=$(block_state "$DOORX" "$((DOORY+1))" "$DOORZ")"
+
+dcmd() { ctl chat "/securitycraft $1 $DOORX $DOORY $DOORZ $2" 2>&1; ctl wait 4; }
+dinfo() { ctl chat "/securitycraft cinfo $DOORX $DOORY $DOORZ" >/dev/null; ctl wait 4; ctl messages 8 | jq -r '.chat[]' | grep -m1 '^securitycraft door ' || true; }
+reply=$(dcmd cset 1357); echo "door code set reply: $(echo "$reply" | jq -r '.chat[0] // .error // .' 2>/dev/null)"
+line=$(dinfo); echo "coded door: $line"
+[ "$(field code "$line")" = set ] || fail "the door did not save its code: $line"
+[ "$(field owner "$line")" = set ] || fail "the door's placer is not its owner: $line"
+[ "$(field open "$line")" = false ] || fail "a fresh coded door is already open: $line"
+
+reply=$(dcmd copen 9999); echo "wrong door code reply: $(echo "$reply" | jq -r '.chat[0] // .error // .' 2>/dev/null)"
+wrong_lower=$(door_open "$DOORX" "$DOORY" "$DOORZ")
+wrong_upper=$(door_open "$DOORX" "$((DOORY+1))" "$DOORZ")
+echo "door halves after a wrong code: lower=$wrong_lower upper=$wrong_upper"
+if [ "$SELFTEST" = keypad-door-full ]; then
+    [ "$wrong_lower" = true ] || fail "SELFTEST: expected the door OPEN after a wrong code"
+fi
+[ "$wrong_lower" = false ] && [ "$wrong_upper" = false ] \
+    || fail "a wrong code opened the door ($wrong_lower/$wrong_upper)"
+
+reply=$(dcmd copen 1357); echo "right door code reply: $(echo "$reply" | jq -r '.chat[0] // .error // .' 2>/dev/null)"
+right_lower=$(door_open "$DOORX" "$DOORY" "$DOORZ")
+right_upper=$(door_open "$DOORX" "$((DOORY+1))" "$DOORZ")
+echo "door halves after the right code: lower=$right_lower upper=$right_upper"
+[ "$right_lower" = true ] && [ "$right_upper" = true ] \
+    || fail "the right code did not open both halves ($right_lower/$right_upper)"
+line=$(dinfo); echo "door after the right code: $line"
+[ "$(field open "$line")" = true ] || fail "the readout did not follow the block state: $line"
+ctl wait 90
+closed_lower=$(door_open "$DOORX" "$DOORY" "$DOORZ")
+closed_upper=$(door_open "$DOORX" "$((DOORY+1))" "$DOORZ")
+echo "door halves after its signal: lower=$closed_lower upper=$closed_upper"
+[ "$closed_lower" = false ] && [ "$closed_upper" = false ] \
+    || fail "the door did not close when its signal ran out ($closed_lower/$closed_upper)"
+ctl close >/dev/null 2>&1 || true
+
+echo "PASS-keypad-door: the passcode door saved its owner and code, a wrong code left both halves open=false, the owner's right code flipped both halves to open=true, and its scheduled tick closed them both; a vanilla iron door beside it opened on redstone with no code"
 
 echo "PASS-smoker: the passcode smoker saved its owner and code, a wrong code left no menu and no slots, the right code opened its three-slot block-backed menu, raw iron did not cook while beef smoked into one cooked_beef with the input consumed and lit=true, and the code and output survived a relaunch; an unprotected vanilla smoker opened with no code"
 

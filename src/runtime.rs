@@ -543,6 +543,41 @@ pub fn trapdoor_tick(remaining: i32) -> (i32, bool) {
     tick_signal(remaining)
 }
 
+/// The two block positions of a double-high passcode door, given the half that was
+/// acted on. Upstream's `KeypadDoorBlock.activate` cycles `open` on both halves;
+/// the harness acts on the lower half, but the rule is symmetric so an upper-half
+/// click closes both too.
+#[must_use]
+pub fn door_halves(pos: [i32; 3], half: &str) -> ([i32; 3], [i32; 3]) {
+    // Normalised to (lower, upper) whichever half was acted on.
+    if half == "upper" {
+        ([pos[0], pos[1] - 1, pos[2]], pos)
+    } else {
+        (pos, [pos[0], pos[1] + 1, pos[2]])
+    }
+}
+
+/// A passcode door's access verdict. Upstream's `KeypadDoorBlock` is the
+/// passcode gate on a carried iron door; its verdict has the same shape as the
+/// trapdoor's (owner first, then the salted digest, then the open countdown).
+#[must_use]
+pub fn door_access(
+    owner: Option<u128>,
+    player: u128,
+    stored: Option<&str>,
+    salt_hex: &str,
+    entered: &str,
+    signal_ticks: i32,
+) -> TrapdoorChange {
+    trapdoor_access(owner, player, stored, salt_hex, entered, signal_ticks)
+}
+
+/// One tick of a passcode door's open countdown, clearing `open` on the last tick.
+#[must_use]
+pub fn door_tick(remaining: i32) -> (i32, bool) {
+    trapdoor_tick(remaining)
+}
+
 fn encode_hex(bytes: &[u8]) -> String {
     let mut hex = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -913,6 +948,52 @@ mod tests {
             (0, false),
             "a closed trapdoor stays closed"
         );
+    }
+
+    #[test]
+    fn a_right_code_opens_both_halves_of_a_passcode_door() {
+        let stored = hash_code("1234", SALT).unwrap();
+        assert_eq!(
+            door_access(
+                Some(OWNER),
+                OWNER,
+                Some(&stored),
+                SALT,
+                "1234",
+                DEFAULT_SIGNAL_TICKS,
+            ),
+            TrapdoorChange::Opened(DEFAULT_SIGNAL_TICKS),
+            "the owner's right code opens the double-high door for signalLength ticks"
+        );
+        assert_eq!(
+            door_access(
+                Some(OWNER),
+                OWNER,
+                Some(&stored),
+                SALT,
+                "9999",
+                DEFAULT_SIGNAL_TICKS,
+            ),
+            TrapdoorChange::Unchanged,
+            "a wrong code leaves both halves closed"
+        );
+        assert_eq!(
+            door_halves([12, 101, -3], "lower"),
+            ([12, 101, -3], [12, 102, -3]),
+            "a lower-half click reaches the upper half one block above"
+        );
+        assert_eq!(
+            door_halves([12, 102, -3], "upper"),
+            ([12, 101, -3], [12, 102, -3]),
+            "an upper-half click reaches the lower half one block below"
+        );
+    }
+
+    #[test]
+    fn a_door_closes_when_its_signal_elapses() {
+        assert_eq!(door_tick(2), (1, false));
+        assert_eq!(door_tick(1), (0, true), "the last tick clears `open`");
+        assert_eq!(door_tick(0), (0, false), "a closed door stays closed");
     }
 
     #[test]

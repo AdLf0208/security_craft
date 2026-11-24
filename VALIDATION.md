@@ -1,6 +1,41 @@
 # Validation
 
-The current package is the flat SDK package (mod API 0.2) at version **0.2.13** (the keypad
+## Slice 14 — the full keypad door (0.2.14)
+
+| Check | Result |
+|---|---|
+| Inventory gate (8 door models + item, jar props vs 26.3) | all `CLEAN`; `keypad_door` 32 variants = `iron_door`; no renderer (`slice13-keypad-door-full-inventory.log`) |
+| Red (`door_halves`/`door_access`/`door_tick` stubbed) | **64 passed / 2 failed** — `Unchanged`/`Opened(60)` and `(2,false)`/`(1,false)` (`slice13-red.log`) |
+| `cargo test --offline` | **67 passed**, 0 failed (`slice13-test.log`, `sdk-test.log` regenerated on the final 0.2.14 tree) |
+| `cargo fmt --check` + `cargo clippy --all-targets --offline -- -D warnings` | Pass, 0 warnings (`slice13-lint.log`) |
+| Two `cargo horizon-mod build`s + `cmp` | byte-identical, `rm -f Cargo.lock` before each (`slice13-build.log`, `slice13-build-cmp.log`) |
+| `cargo horizon-mod check securitycraft.hmod` | `0.2.14 (native-mod, … for 26.3)`, EXIT 0 (`slice13-check-fits.log`) |
+| `fits --build 0a875da` / `--build 0b14f8a` | `made for` / `fits`, EXIT 0, delivered SHA (`slice13-check-fits.log`) |
+| `verify-sdk-package.py securitycraft` | 1/1, `package matches the tree`, 67 tests, SDK-only deps, no lock (`slice13-verify-sdk-package.log`) |
+| Launcher build | stale native tag moved aside, `Compiling securitycraft (1 of 1)`, `native-0a875da-d7ae016d6da7 built` (`slice13-launcher-build.log`) |
+| In-game scenario (`tools/e2e.sh`, launcher-built game) | **PASS + `EXIT:0`**, all 23 phases incl. phase 23 (`securitycraft-e2e/e2e-launcher.log`) |
+| Control (unmodified Nightly) | `EXIT:1` at phase 1 (`e2e-control.log`) |
+| Ids-unknown control (`CONTROL=1`) | PASS + `EXIT:0`, ids unknown (`e2e-ids-unknown.log`) |
+| SELFTEST (full door) | `EXIT:1` at phase 23, "expected the door OPEN after a wrong code" (`e2e-selftest-keypad-door-full.log`) |
+| Prior SELFTESTs (14 legs) | `EXIT:1` at each own assertion, re-run against 0.2.14 (`e2e-selftest*.log`) |
+| `check-e2e-logs.py securitycraft-e2e --strict` | `logs=36 ok=36`, exit 0 (`slice13-check-e2e-logs.log`) |
+| `check-recipe-types.py securitycraft` | `securitycraft: ok`, exit 0 (`slice13-check-recipe-types.log`) |
+
+The delivered package is `securitycraft.hmod` **113,206 B**, SHA-256
+`fd39a05a0058ee0a3f11c6ba7c78f3523f16ccb333bd298e4092ce980cfb8a56`, **130 entries**, version
+**0.2.14**, SDK-only dependency set (R9) and no packed `Cargo.lock`. The launcher build printed
+`Compiling securitycraft (1 of 1)` after the manifest bump; `sdk-test.log` was regenerated on the
+final 0.2.14 tree (67 tests) before the last `verify-sdk-package.py` run, which reports
+`package matches the tree`.
+
+Phase 23 proves the carried `keypad_door`: a vanilla iron door opens on redstone with no code; a
+wrong `copen` leaves both halves `open=false`; the owner's right code flips both to `open=true`;
+and the scheduled 60-tick countdown closes both. `SELFTEST=keypad-door-full` inverts the
+wrong-code assertion and fails exactly there. `ctl messages` stays at **8**; pre-existing
+phase-14/17 placement flakes stopped several legs and the identical legs were retried unchanged
+(flake logs kept, none called green).
+
+The package before this slice was the flat SDK package (mod API 0.2) at version **0.2.13** (the keypad
 trapdoor slice), validated on Linux with rustc 1.95.0 on 2026-11-24 against Horizon
 `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. All Rust steps ran through **forwarded**
