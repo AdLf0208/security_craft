@@ -54,6 +54,11 @@
 #     nothing (`screen=playing`), the keypad stays unpowered and the door stays closed.
 #     Swapping the list to stranger makes the identical click open the code screen, still
 #     with no power and a closed door. `SELFTEST=deny` inverts the first assertion.
+# 17. SMART: craft the jar's smart module (ender pearl in the last row) and install it on a
+#     second coded keypad with a door. Five wrong codes followed by the right one must be
+#     refused (`status=6`, unpowered, door closed) — upstream gates the cooldown on that
+#     module. Phase 3b proves the same five wrong codes do NOT lock out a keypad without
+#     any module. `SELFTEST=smart` inverts the phase 3b no-module assertion.
 # 15. RELAUNCH: the same world is quit and started again; the code stored before the
 #     restart still opens the same keypad and a wrong code is still refused, so the
 #     digest is recomputed from the saved salt rather than held in the session.
@@ -66,6 +71,7 @@
 #   SELFTEST=relaunch tools/e2e.sh # phase 15 expects the stored digest lost: exit 1
 #   SELFTEST=allow tools/e2e.sh    # phase 14 expects an allowed click not to power: exit 1
 #   SELFTEST=deny tools/e2e.sh     # phase 16 expects a denied click to open a screen: exit 1
+#   SELFTEST=smart tools/e2e.sh    # phase 3b expects a no-module cooldown: exit 1
 #   CONTROL=1 tools/e2e.sh     # no package at all: the ids must be unknown
 #   GAME=<an unmodified game> tools/e2e.sh   # the differential: the first phase fails
 #
@@ -349,7 +355,7 @@ if [ "$SELFTEST" = 1 ]; then
         || fail "SELFTEST: expected the door OPEN after a wrong code"
 fi
 
-say "phase 3b: a closed screen starts empty, and five wrong codes rate-limit the session"
+say "phase 3b: a closed screen starts empty, and five wrong codes do not lock out a keypad without the smart module"
 open_screen "$KEY_X" "$KEY_Y" "$KEY_Z"
 type_code 12
 ctl close >/dev/null 2>&1 || true
@@ -358,7 +364,8 @@ open_screen "$KEY_X" "$KEY_Y" "$KEY_Z"
 line=$(info "$KEY_X" "$KEY_Y" "$KEY_Z")
 echo "after reopening: $line"
 [ -z "$(field entered "$line")" ] || fail "digits survived the screen close: $line"
-# Phase 3 spent one failure; four more reach the five-attempt budget.
+# Phase 3 spent one wrong code; four more would be five. Upstream only starts a
+# keypad cooldown when the smart module is installed, so the right code still opens.
 for _ in 1 2 3 4; do
     type_code 9999
     press_submit
@@ -366,12 +373,18 @@ done
 type_code 1234
 press_submit
 line=$(info "$KEY_X" "$KEY_Y" "$KEY_Z")
-echo "right code while locked out: $line"
-[ "$(field status "$line")" = 6 ] || fail "the right code was not rate-limited: $line"
-[ "$(field powered "$line")" = false ] || fail "a locked-out attempt powered the keypad: $line"
-[ "$(door_open "$DOOR_X" 101 "$DOOR_Z")" = false ] || fail "a locked-out attempt opened the door"
+echo "right code after five wrong codes, with no module: $line"
+if [ "$SELFTEST" = smart ]; then
+    # Fail-capability: invert the no-module assertion — a cooldown must NOT apply.
+    [ "$(field status "$line")" = 6 ] \
+        || fail "SELFTEST: expected a no-module keypad to be rate-limited"
+fi
+[ "$(field status "$line")" = 3 ] || fail "the right code was rate-limited without the smart module: $line"
+[ "$(field powered "$line")" = true ] || fail "the right code did not power the keypad: $line"
+[ "$(door_open "$DOOR_X" 101 "$DOOR_Z")" = true ] || fail "the right code did not open the door"
 ctl close >/dev/null 2>&1 || true
-ctl wait 220
+# The no-module keypad is powered for signalLength ticks; let it close before phase 4.
+ctl wait 80
 
 say "phase 4: the right code powers the keypad and opens the adjacent reinforced door"
 open_screen "$KEY_X" "$KEY_Y" "$KEY_Z"
@@ -956,6 +969,90 @@ echo "non-denied click: screen=$screen $line"
 [ "$(door_open "$DENY_DOOR_X" 101 "$DENY_DOOR_Z")" = false ] || fail "a non-denied click opened the door"
 ctl close >/dev/null 2>&1 || true
 
+say "phase 17: the smart module applies the retry cooldown that phase 3b showed is absent without it"
+# Upstream's `IPasscodeProtected.onIncorrectPasscodeEntered` calls `startCooldown()`
+# only when `isModuleEnabled(ModuleType.SMART)`; `CheckPasscode.handle` refuses a
+# verification while that cooldown holds. The jar's smart_module recipe is
+# III/IPI/ISI with an ender pearl (the pack's `c:ender_pearls` resolves to it).
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl wait 2
+ctl give minecraft:iron_ingot 7 >/dev/null
+ctl give minecraft:paper 1 >/dev/null
+ctl give minecraft:ender_pearl 1 >/dev/null
+ctl wait 6
+open_screen_table "$ATABLE_X" "$ATABLE_Z"
+for cell in 100 101 102 103 105 106 108; do grid_put_one minecraft:iron_ingot "$cell"; done
+grid_put_one minecraft:paper 104
+grid_put_one minecraft:ender_pearl 107
+ctl wait 4
+result=$(ctl screen | jq -r '[.slots[]? | select(.slot == 200) | .item][0] // "empty"')
+echo "smart recipe result: $result"
+[ "$result" = securitycraft:smart_module ] || fail "the smart module recipe produced '$result'"
+ctl click-slot 200 shift >/dev/null || fail "cannot take the crafted smart module"
+ctl wait 4
+left=$(ctl screen | jq -r '[.slots[]? | select(.slot >= 100 and .slot <= 108 and .item != null)] | length')
+echo "smart grid slots still holding an item: $left"
+[ "$left" = 0 ] || fail "the smart recipe did not consume its ingredients ($left grid slots filled)"
+held=$(inv_slot_of securitycraft:smart_module)
+echo "smart module in inventory slot: ${held:-none}"
+[ -n "$held" ] || fail "the crafted smart module is not in the inventory"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4
+
+SMART_DOOR_X=$((PX-1)); SMART_DOOR_Z=$((PZ-2))
+SMART_KEY_X=$((PX-2)); SMART_KEY_Y=101; SMART_KEY_Z=$((PZ-2))
+ctl give "$DOOR" 1 >/dev/null
+ctl give securitycraft:keypad_item 1 >/dev/null
+ctl wait 6
+ctl tp "$(( SMART_DOOR_X + 1 )).5" 101 "$(( SMART_DOOR_Z + 2 )).5" >/dev/null
+ctl wait 4
+ctl look 180 0
+ctl select "$DOOR" >/dev/null
+ctl place "$SMART_DOOR_X" 101 "$SMART_DOOR_Z" >/dev/null || fail "the smart keypad's door did not place"
+ctl wait 4
+block_name "$SMART_DOOR_X" 101 "$SMART_DOOR_Z" | grep -qx "$DOOR" || fail "no smart door"
+[ "$(door_open "$SMART_DOOR_X" 101 "$SMART_DOOR_Z")" = false ] || fail "the smart door started open"
+ctl tp "$(( SMART_KEY_X + 1 )).5" 101 "$(( SMART_KEY_Z + 2 )).5" >/dev/null
+ctl wait 4
+ctl select securitycraft:keypad_item >/dev/null
+echo "smart placement: target=$(block_name "$SMART_KEY_X" 101 "$SMART_KEY_Z") counts=$(ctl inventory | jq -c '.counts')"
+reply=$(ctl place "$SMART_KEY_X" "$SMART_KEY_Y" "$SMART_KEY_Z" 2>&1) || { echo "smart place reply: $reply"; fail "the smart keypad did not place"; }
+echo "smart place reply: $reply"
+ctl wait 4
+block_name "$SMART_KEY_X" "$SMART_KEY_Y" "$SMART_KEY_Z" | grep -qx "$KEYPAD" || fail "no smart keypad"
+code_cmd "$SMART_KEY_X" "$SMART_KEY_Y" "$SMART_KEY_Z" 1234
+line=$(info "$SMART_KEY_X" "$SMART_KEY_Y" "$SMART_KEY_Z")
+echo "coded smart keypad: $line"
+[ "$(field code "$line")" = set ] || fail "the smart keypad has no code: $line"
+[ "$(field modules "$line")" = none ] || fail "the smart keypad already has a module: $line"
+
+ctl select securitycraft:smart_module >/dev/null
+ctl tp "$(( SMART_KEY_X + 1 )).5" 101 "$(( SMART_KEY_Z + 2 )).5" >/dev/null
+ctl wait 4
+ctl look 180 0
+ctl look-at block "$SMART_KEY_X" "$SMART_KEY_Y" "$SMART_KEY_Z" south >/dev/null 2>&1 || true
+ctl interact "$SMART_KEY_X" "$SMART_KEY_Y" "$SMART_KEY_Z" south >/dev/null || fail "the keypad did not take the smart module"
+ctl wait 6
+line=$(info "$SMART_KEY_X" "$SMART_KEY_Y" "$SMART_KEY_Z")
+echo "after installing the smart module: $line"
+[ "$(field modules "$line")" = smart ] || fail "the smart module was not installed: $line"
+[ "$(field code "$line")" = set ] || fail "installing the smart module lost the code: $line"
+
+open_screen "$SMART_KEY_X" "$SMART_KEY_Y" "$SMART_KEY_Z"
+for _ in 1 2 3 4 5; do
+    type_code 9999
+    press_submit
+done
+type_code 1234
+press_submit
+line=$(info "$SMART_KEY_X" "$SMART_KEY_Y" "$SMART_KEY_Z")
+echo "right code with the smart module: $line"
+[ "$(field status "$line")" = 6 ] || fail "the smart module did not rate-limit the right code: $line"
+[ "$(field powered "$line")" = false ] || fail "a locked-out attempt powered the smart keypad: $line"
+[ "$(door_open "$SMART_DOOR_X" 101 "$SMART_DOOR_Z")" = false ] || fail "a locked-out attempt opened the smart door"
+ctl close >/dev/null 2>&1 || true
+
 say "phase 15: a code set before a restart still opens the same keypad after it"
 # The digest is salted SHA-256 over data the keypad saved, so a restart re-reads the
 # same salt and the same digest from the block entity and must recompute a match. A
@@ -992,5 +1089,5 @@ echo "the right code after the relaunch: $line"
 [ "$(door_open "$DOOR_X" 101 "$DOOR_Z")" = true ] || fail "the keypad's signal after the relaunch did not open the door"
 ctl close >/dev/null 2>&1 || true
 
-echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes rate-limited a correct one; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke — and survived a level-side /setblock removal as a dropped item; a keypad without the module did not hurt a wrong code; and only the owner may set a keypad's first code — a stranger's click opened no set screen, a set screen that outlived an owner change stored nothing, the owner set it, and a stranger's /securitycraft code was refused; the allowlist module crafted from seven iron and two paper was installed on a coded keypad and an allowed click with nothing typed powered it and opened its door without a code screen, while swapping the player for a stranger restored the code screen and left the door closed; the denylist module crafted from seven iron, paper and an ink sac was installed on a coded keypad and a listed player's click opened nothing, powered nothing and left the door closed, while swapping the list to a stranger restored the code screen with the door still closed; and after quitting and relaunching the same world the code stored before the restart still opens the keypad and a wrong code is still refused"
+echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes did NOT rate-limit a correct one without the smart module; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke — and survived a level-side /setblock removal as a dropped item; a keypad without the module did not hurt a wrong code; and only the owner may set a keypad's first code — a stranger's click opened no set screen, a set screen that outlived an owner change stored nothing, the owner set it, and a stranger's /securitycraft code was refused; the allowlist module crafted from seven iron and two paper was installed on a coded keypad and an allowed click with nothing typed powered it and opened its door without a code screen, while swapping the player for a stranger restored the code screen and left the door closed; the denylist module crafted from seven iron, paper and an ink sac was installed on a coded keypad and a listed player's click opened nothing, powered nothing and left the door closed, while swapping the list to a stranger restored the code screen with the door still closed; the smart module crafted from seven iron, paper and an ender pearl was installed on a second coded keypad and five wrong codes then made the right one read status=6 with the keypad unpowered and the door closed, while the same five wrong codes on a keypad without the module still opened it; and after quitting and relaunching the same world the code stored before the restart still opens the keypad and a wrong code is still refused"
 # The cleanup trap prints the run's exit status as the last line.

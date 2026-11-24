@@ -157,11 +157,17 @@ impl Hooks for Mod {
         let item = r.item_key(support::KEYPAD_ITEM);
         r.item_part(item, KeyPanel);
         // A removal hook only has a `LevelHost`, which cannot resolve an id, so the
-        // keys of all three droppable modules are stored once here.
+        // keys of all four droppable modules are stored once here.
         let harming_module = r.item_key(support::HARMING_MODULE);
         let allowlist_module = r.item_key(support::ALLOWLIST_MODULE);
         let denylist_module = r.item_key(support::DENYLIST_MODULE);
-        support::set_module_items(harming_module, allowlist_module, denylist_module);
+        let smart_module = r.item_key(support::SMART_MODULE);
+        support::set_module_items(
+            harming_module,
+            allowlist_module,
+            denylist_module,
+            smart_module,
+        );
     }
 
     /// `/securitycraft info|code|owner`: the harness controls this slice's e2e needs (a headless

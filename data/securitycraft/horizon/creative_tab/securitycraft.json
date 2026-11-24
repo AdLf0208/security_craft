@@ -6,6 +6,7 @@
     "securitycraft:iron_door_reinforced",
     "securitycraft:harming_module",
     "securitycraft:allowlist_module",
-    "securitycraft:denylist_module"
+    "securitycraft:denylist_module",
+    "securitycraft:smart_module"
   ]
 }

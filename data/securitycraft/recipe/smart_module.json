@@ -1,0 +1,17 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "I": "minecraft:iron_ingot",
+    "P": "minecraft:paper",
+    "S": "minecraft:ender_pearl"
+  },
+  "pattern": [
+    "III",
+    "IPI",
+    "ISI"
+  ],
+  "result": {
+    "id": "securitycraft:smart_module"
+  }
+}

@@ -1781,3 +1781,190 @@ refused with `status=6`, `powered=false` and the door `closed`. `SELFTEST=smart`
 first (no-module) assertion and end `EXIT:1`; the deny/allow phases must stay green in the same
 leg. If the pin cannot express the per-player cooldown without the module, stop and report the
 gap instead of faking it.
+
+## Slice 7 — the smart module gate on the retry cooldown (2026-11-24, SDK `0a875da`) — 0.2.8
+
+**Slice.** The `## Next slice` above, from slice 3's deviation *"the port's throttle is
+unconditional since review #1197, so a keypad without the smart module still rate-limits"* and the
+gap line *"the smart and harming modules; the disguise module"*. Class **content**, tier **deep**
+in the ledger; the delivered shape is the port's existing **logic + machines** half plus one
+carried module item, one more id in `modules`, the same owner install/drop paths and one pure rule
+making the existing `Throttle` conditional on the module — **no new block, renderer or hook kind**.
+The deny-before-allow order in `on_use` is untouched.
+
+### Upstream read (the artefact wins over the brief's name)
+
+The jar (`ports/_shared/carry-work/securitycraft/securitycraft-1.10.2.1.jar`) carries the item id
+**`securitycraft:smart_module`** — the same name the brief used, but read from the artefact first:
+`assets/securitycraft/models/item/smart_module.json` (93 B),
+`assets/securitycraft/textures/item/smart_module.png` (545 B, sha256 `c20c93b4…bac8c`),
+`data/securitycraft/recipe/smart_module.json` and the `item.securitycraft.smart_module` /
+`module.securitycraft.keypad.smart_module.description` lang lines. The recipe is
+`III / IPI / ISI` with `I = c:ingots/iron`, `P = minecraft:paper`, **`S = c:ender_pearls`** — a
+different last ingredient from the harming (arrow), allowlist (paper) and denylist (ink sac)
+modules; the port uses `minecraft:ender_pearl` as the pack's tag resolves.
+
+The pinned commit's Java source (`Geforce132/SecurityCraft` `c4d35b0c`, read from
+`src/main/java/net/geforcemods/securitycraft/`, behaviour only) gave the exact rule:
+
+| File | What it says |
+|---|---|
+| `api/IPasscodeProtected.java` (`onIncorrectPasscodeEntered`, lines 298–306) | on a wrong code, `isModuleEnabled(ModuleType.SMART)` → `startCooldown()`; the harming module's damage is a separate `if` after it. |
+| `api/Option.java` (`SmartModuleCooldownOption`, lines 290–293) | the cooldown is a tick count, default **100** (5 s), range 20–400; its lang description says "requires Smart Module". |
+| `network/server/CheckPasscode.java` (`handle`) | two gates before hashing: the **per-player** 250 ms spam guard (`PasscodeUtils.isOnCooldown(player)`) and the **keypad** cooldown (`passcodeProtected.isOnCooldown()`); the latter is the one the smart module starts. |
+
+The port's `Throttle` (review #1197) is its own form of the keypad cooldown: five wrong codes start
+a ten-second lockout. This slice does not redesign it, it **gates it on the module**: without a
+smart module upstream starts no keypad cooldown, so five wrong codes must still let the right code
+open the keypad. The per-player 250 ms spam guard is not modelled (recorded as a deviation).
+
+### Red proof (TDD, before the rule existed)
+
+`cooldown_allows` / `cooldown_failed` were added with stubs that kept the old unconditional
+behaviour, and two tests were written first. Forwarded `cargo test --offline` (`slice7-red.log`):
+
+```
+---- runtime::tests::a_keypad_without_the_smart_module_has_no_cooldown stdout ----
+
+thread 'runtime::tests::a_keypad_without_the_smart_module_has_no_cooldown' (257375) panicked at src/runtime.rs:724:9:
+five wrong codes must not rate-limit a keypad without the smart module
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- runtime::tests::the_smart_module_gates_the_existing_retry_budget stdout ----
+
+thread 'runtime::tests::the_smart_module_gates_the_existing_retry_budget' (257408) panicked at src/runtime.rs:746:9:
+the same budget is ignored without the module
+
+test result: FAILED. 52 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+```
+
+The rules became `!smart || throttle.allows(now_ms)` and `if smart { throttle.failed(now_ms) }`;
+**54 passed**, 0 failed (`slice7-test.log`, regenerated into `sdk-test.log` for 0.2.8).
+
+### What the slice implements
+
+- **The pure rule** (`runtime::cooldown_allows`, `runtime::cooldown_failed`): the existing
+  `Throttle` is consulted and filled only when a smart module is installed; no budget is recorded
+  without one, so installing it later cannot inherit lockout failures earned before it was there.
+  A correct code still calls `Throttle::succeeded()` and clears the budget.
+- **The glue** (`support::apply_key`): the module is read from the saved `modules` list before the
+  server's pre-comparison gate and before a wrong-code failure is recorded. A locked-out submit
+  still returns before the digest comparison and reads `status=6`; the deny and allow branches in
+  `on_use` and their order are unchanged.
+- **Content.** `securitycraft:smart_module` (the jar's model, 16×16 texture and lang, the jar's
+  recipe with `minecraft:ender_pearl` standing in for `c:ender_pearls`), its creative-tab entry,
+  the resolved item key registered with the other three modules, and the drop paths
+  (`block_changed` + `level_tick_post` and a player break).
+- **Readout.** `/securitycraft info` now lists `smart` in `modules=`. No new harness command: the
+  module is installed with the real held-item right-click, as the other three are.
+
+### Verification (0.2.8, SDK `0a875da`, 2026-11-24)
+
+Every Rust step ran in a **forwarded** `build-slot.sh` lease on `AdLf-PC` (`build-slot:
+forwarding … to the remote runner`, relative `--port ports/securitycraft`, `CARGO_INCREMENTAL=0`,
+**no `BUILD_LOCAL=1`**); the launcher build and the game legs stayed local (the e2e is
+`--offscreen`). Logs are in `../_shared/evidence/securitycraft/` and
+`../_shared/evidence/securitycraft-e2e/`.
+
+| Check | Command | Result |
+|---|---|---|
+| Red | forwarded `cargo test --offline` with the rule stubbed | **52 passed / 2 failed** (`slice7-red.log`) |
+| Tests | forwarded `cargo test --offline` | **54 passed**, 0 failed (`slice7-test.log`, `sdk-test.log`) |
+| Format + lints | forwarded `cargo fmt --check && cargo clippy --all-targets --offline -- -D warnings` | exit 0, **0 warnings** (`slice7-lint.log`) |
+| Package ×2 | `rm -f Cargo.lock` before each; two builds + `cmp` | **byte-identical** (`slice7-build.log`) |
+| Delivered | `securitycraft.hmod` | **69,773 B**, SHA-256 `b93884158f168af3e41b84dd700ce47befcdacecf49ea0e5a759bd744c504051`, **61 entries**, **no `Cargo.lock`** |
+| Registry check | forwarded `cargo horizon-mod check securitycraft.hmod` | `securitycraft 0.2.8 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, same SHA, EXIT 0 (`slice7-check-fits.log`) |
+| Pinned build | forwarded `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, EXIT 0, delivered SHA quoted (`slice7-check-fits.log`) |
+| Another build | forwarded `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, EXIT 0, same SHA (`slice7-check-fits.log`) |
+| Gate | `verify-sdk-package.py securitycraft` | **1/1**, incl. `package matches the tree`, SDK-only deps, no lock, 54 tests (`slice7-verify-sdk-package.log`) |
+| Clean launcher build | stale 0.2.7 tag moved aside, then `launcher-game.sh build securitycraft` | `Compiling securitycraft (1 of 1)`, no registry crates, `native-0a875da-6abd9a7c8302` (`slice7-launcher-build.log`) |
+| In-game PASS | launcher-built game carrying 0.2.8 | **PASS + `EXIT:0`** (`securitycraft-e2e/e2e-launcher.log`) |
+| Control | `GAME=$CONTROL_GAME`, unmodified Nightly | **`EXIT:1`** at phase 1 (`e2e-control.log`) |
+| Ids-unknown control | `CONTROL=1` | PASS + `EXIT:0`, both ids unknown (`e2e-ids-unknown.log`) |
+| SELFTEST (smart) | `SELFTEST=smart` | **`EXIT:1`** at phase 3b, "expected a no-module keypad to be rate-limited" (`e2e-selftest-smart.log`) |
+| SELFTEST (door/harm/nonloot/owner/relaunch/allow/deny) | `SELFTEST=1\|harming\|nonloot\|owner\|relaunch\|allow\|deny` | **`EXIT:1`** at each own assertion (`e2e-selftest*.log`) |
+| Log checker | `check-e2e-logs.py securitycraft-e2e --strict` | `logs=13 ok=13`, exit 0 (`slice7-check-e2e-logs.log`) |
+| Recipe types | `check-recipe-types.py securitycraft` | `securitycraft: ok`, exit 0 |
+
+Phase 17 quoted from `e2e-launcher.log`:
+
+```
+smart recipe result: securitycraft:smart_module
+smart grid slots still holding an item: 0
+coded smart keypad: securitycraft keypad 10 101 -2 code=set entered= mode=check signal=0 powered=false status=2 modules=none allow=0 deny=0 owner=set door=11,101,-2:closed
+after installing the smart module: … modules=smart allow=0 deny=0 owner=set door=11,101,-2:closed
+right code with the smart module: securitycraft keypad 10 101 -2 code=set entered= mode=check signal=0 powered=false status=6 modules=smart allow=0 deny=0 owner=set door=11,101,-2:closed
+```
+
+and phase 3b in the same leg:
+
+```
+right code after five wrong codes, with no module: securitycraft keypad 13 101 0 code=set entered= mode=check signal=57 powered=true status=3 modules=none allow=0 deny=0 owner=set door=12,101,0:open
+```
+
+Both value pairs are fail-capable: `SELFTEST=smart` inverts the no-module `status=3` / powered /
+door-open assertion and fails exactly there (`EXIT:1`); the module leg's own assertion is proved by
+the differential between the two keypads in the same run. The allowlist, denylist, owner and
+relaunch legs stayed green unchanged in this leg.
+
+### Coverage added by this slice
+
+| Family | Status |
+|---|---|
+| `securitycraft:smart_module` item (give, craft, install, drop) | **tested** — phase 17 recipe (id/count + emptied grid), install, `all_four_installed_modules_drop` |
+| the smart recipe (III/IPI/ISI, iron + paper + ender pearl) | **tested** — phase 17: output id and an emptied grid |
+| with the module: five wrong codes then right → cooldown | **tested** — phase 17: `status=6`, `powered=false`, door `closed` |
+| without the module: five wrong codes then right → opens | **tested** — phase 3b: `status=3`, `powered=true`, door `open`; inverted by `SELFTEST=smart` |
+| a late install does not inherit old failures | **unit test** `a_keypad_without_the_smart_module_has_no_cooldown` |
+| deny before allow is unchanged | **unit test** `a_denied_player_is_refused` + the unchanged branch order in `on_use`; phases 14/16 green in the PASS leg |
+| the module's 100-tick default / configurable cooldown length | **not ported** — the port keeps review #1197's ten-second throttle, gated on the module; config is not exposed (recorded as a deviation) |
+| customize screen (remove/toggle a module) | **not ported** — no module inventory screen |
+| disguise module and the rest of the gap list | **not ported** — unchanged from slices 1/3/4/5/6 |
+
+### Deviations recorded by this slice
+
+1. **The cooldown is the port's review-#1197 throttle (five failures, ten seconds), not upstream's
+   100-tick default.** Upstream starts a fresh fixed cooldown on each wrong code with the smart
+   module; this port keeps the existing five-strike budget and merely makes it conditional on the
+   module. The observable contract the slice proves is the same: no module → no keypad cooldown,
+   module → the right code after five wrong ones is refused. The config option is not exposed.
+2. **The per-player 250 ms spam guard is not modelled.** Upstream's `CheckPasscode` checks it
+   before the keypad cooldown; the harness's key presses are several ticks apart, so it never
+   decides an assertion here.
+3. **The recipe's `S` is `minecraft:ender_pearl`**, the resolved member of the jar's
+   `c:ender_pearls` tag (the same vanilla-id convention as the earlier modules' iron and arrow).
+4. **Module data is still ids + separate player lists, not an `ItemStack` component** (slice 3's
+   deviation); installing and dropping are faithful, a component round-trip is not.
+5. **A transient first PASS-leg attempt stopped at phase 17's keypad placement** (`FAIL: the smart
+   keypad did not place`, `EXIT:1`) after the smart recipe and install succeeded. No source or
+   package byte changed before the retry; the retry only added a diagnostic echo of the target,
+   inventory counts and the `ctl place` reply (extra ctl round-trips), after which the same place
+   answered `changed:true` on air and the whole leg passed. Recorded, not called green; the
+   terminal excerpt is `../_shared/evidence/securitycraft-e2e/e2e-smart-first-attempt-flake.log`.
+   The previously recorded phase-11b module-stash flake did not recur in any leg this wave.
+
+### Changelog for the resubmission (0.2.8)
+
+> Supersedes #1805→0.2.7 (the staged PR). Adds the smart module carried from the jar
+> (`smart_module`'s recipe with an ender pearl, texture, model and lang) and closes the deviation
+> recorded in slice 3: upstream's keypad cooldown now applies only when that module is installed,
+> so five wrong codes followed by the right one open a keypad without a module and are refused
+> (`status=6`, unpowered, door closed) on one with it. The pure gate, the owner install/drop paths,
+> the readout and two inverted-selftest phases prove it; the SHA-256 primitive, SDK-only dependency
+> set, save format and deny-before-allow order are unchanged.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-review, rust-port
+
+## Next slice
+
+**Family:** the **disguise module and its keypad tint** — the last of the module family in the gap
+line from slice 3 ("the smart and harming modules; the disguise module"), now that harming,
+allowlist, denylist and smart are all ported. It fits tier **deep** only if the SDK exposes a
+per-block tint/colour hook for the keypad's rendered model: carry the jar's `disguise_module` item,
+recipe, texture and lang, add a fifth `modules` id through the same install/drop paths, and render
+the keypad as the disguise item's model when installed. **First check the pin** with
+`cargo horizon-mod hooks <tint>` / grep the SDK's `surface.json` for a block/item colour or model
+override: if that surface is absent, report `blocked(no-disguise-render-surface)` with the measured
+zero-hit grep rather than shipping an inert item. Its in-game assertion would be an `--offscreen`
+`screenshot` leg: install a disguise module on a keypad, give the disguise item the module names,
+and read a pixel colour that differs from an undisguised keypad, with an inverted `SELFTEST=disguise`.

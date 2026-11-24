@@ -33,8 +33,8 @@ use mod_api::{
 
 use crate::runtime::{
     Action, Button, DEFAULT_SIGNAL_TICKS, Entry, ListData, Mode, Throttle, after_submit, button,
-    facing_from_yaw, hash_code, is_allowed, is_denied, may_install, may_set_code, new_salt,
-    tick_signal, valid_code, wrong_code_damage,
+    cooldown_allows, cooldown_failed, facing_from_yaw, hash_code, is_allowed, is_denied,
+    may_install, may_set_code, new_salt, tick_signal, valid_code, wrong_code_damage,
 };
 
 /// The keypad block; its item (`securitycraft:keypad_item`) places it.
@@ -82,6 +82,10 @@ pub(crate) const ALLOWLIST_MODULE: &str = "securitycraft:allowlist_module";
 /// `blacklist_module` (`ModuleType.DENYLIST`); the port uses the module's current
 /// name, as it did for the allowlist (recorded as a deviation in `notes.md`).
 pub(crate) const DENYLIST_MODULE: &str = "securitycraft:denylist_module";
+/// The smart module's item id, as the jar registers it (`smart_module`). Upstream's
+/// `IPasscodeProtected.onIncorrectPasscodeEntered` starts the keypad's cooldown only
+/// when this module is installed.
+pub(crate) const SMART_MODULE: &str = "securitycraft:smart_module";
 /// The damage type a wrong code uses (`data/securitycraft/damage_type/incorrect_passcode.json`),
 /// upstream's `CustomDamageSources.INCORRECT_PASSCODE`.
 pub(crate) const INCORRECT_PASSCODE: &str = "securitycraft:incorrect_passcode";
@@ -92,16 +96,23 @@ struct ModuleItems {
     harming: ItemKey,
     allowlist: ItemKey,
     denylist: ItemKey,
+    smart: ItemKey,
 }
 
 static MODULE_ITEMS: OnceLock<ModuleItems> = OnceLock::new();
 
-/// Store all three module keys at registration.
-pub(crate) fn set_module_items(harming: ItemKey, allowlist: ItemKey, denylist: ItemKey) {
+/// Store all four module keys at registration.
+pub(crate) fn set_module_items(
+    harming: ItemKey,
+    allowlist: ItemKey,
+    denylist: ItemKey,
+    smart: ItemKey,
+) {
     let _ = MODULE_ITEMS.set(ModuleItems {
         harming,
         allowlist,
         denylist,
+        smart,
     });
 }
 
@@ -111,6 +122,7 @@ fn module_item(module: &str) -> Option<ItemKey> {
         HARMING_MODULE => Some(items.harming),
         ALLOWLIST_MODULE => Some(items.allowlist),
         DENYLIST_MODULE => Some(items.denylist),
+        SMART_MODULE => Some(items.smart),
         _ => None,
     }
 }
@@ -492,6 +504,7 @@ pub(crate) fn on_use(
             HARMING_MODULE => Some(HARMING_MODULE),
             ALLOWLIST_MODULE => Some(ALLOWLIST_MODULE),
             DENYLIST_MODULE => Some(DENYLIST_MODULE),
+            SMART_MODULE => Some(SMART_MODULE),
             _ => None,
         });
     if let Some(module) = module
@@ -823,10 +836,13 @@ fn apply_key(
             let mode = Mode::from_int(int(nbt, KEY_MODE));
             // The retry budget is checked on the server before any digest comparison, so a
             // locked-out guess costs nothing (and cannot be distinguished from a wrong one).
+            // Upstream's keypad-side cooldown exists only with the smart module: without it
+            // there is no lockout, however many wrong codes were typed.
+            let smart = has_module(nbt, SMART_MODULE);
             let now = now_ms();
             let allowed = {
                 let mut guard = attempts();
-                guard.entry(session.clone()).or_default().allows(now)
+                cooldown_allows(smart, guard.entry(session.clone()).or_default(), now)
             };
             if mode == Mode::Check && !allowed {
                 entry.clear();
@@ -864,7 +880,7 @@ fn apply_key(
                 Action::Wrong => {
                     {
                         let mut guard = attempts();
-                        guard.entry(session.clone()).or_default().failed(now);
+                        cooldown_failed(smart, guard.entry(session.clone()).or_default(), now);
                     }
                     entry.clear();
                     store_entry(session, &entry);
@@ -999,7 +1015,7 @@ fn dropped_module_ids(installed: &[String]) -> Vec<String> {
         .filter(|module| {
             matches!(
                 module.as_str(),
-                HARMING_MODULE | ALLOWLIST_MODULE | DENYLIST_MODULE
+                HARMING_MODULE | ALLOWLIST_MODULE | DENYLIST_MODULE | SMART_MODULE
             )
         })
         .cloned()
@@ -1177,6 +1193,9 @@ fn keypad_info(
         }
         if has_module(&data, DENYLIST_MODULE) {
             names.push("denylist");
+        }
+        if has_module(&data, SMART_MODULE) {
+            names.push("smart");
         }
         if names.is_empty() {
             "none".to_owned()
@@ -1748,17 +1767,29 @@ mod tests {
     }
 
     #[test]
-    fn all_three_installed_modules_drop() {
+    fn a_smart_module_round_trips_through_the_saved_compound() {
+        let mut nbt = Compound::new();
+        assert!(!has_module(&nbt, SMART_MODULE));
+        add_module(&mut nbt, SMART_MODULE);
+        add_module(&mut nbt, SMART_MODULE);
+        assert_eq!(modules(&nbt), vec![SMART_MODULE.to_owned()]);
+        assert!(has_module(&nbt, SMART_MODULE));
+    }
+
+    #[test]
+    fn all_four_installed_modules_drop() {
         let mut nbt = Compound::new();
         add_module(&mut nbt, HARMING_MODULE);
         add_module(&mut nbt, ALLOWLIST_MODULE);
         add_module(&mut nbt, DENYLIST_MODULE);
+        add_module(&mut nbt, SMART_MODULE);
         assert_eq!(
             dropped_module_ids(&modules(&nbt)),
             vec![
                 HARMING_MODULE.to_owned(),
                 ALLOWLIST_MODULE.to_owned(),
-                DENYLIST_MODULE.to_owned()
+                DENYLIST_MODULE.to_owned(),
+                SMART_MODULE.to_owned()
             ]
         );
     }

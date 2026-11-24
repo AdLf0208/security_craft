@@ -409,6 +409,29 @@ impl Throttle {
     }
 }
 
+/// Whether a verification may go ahead on a keypad that may carry the smart module.
+///
+/// Upstream's keypad-side cooldown exists only with that module: `IPasscodeProtected`
+/// `onIncorrectPasscodeEntered` calls `startCooldown()` under
+/// `isModuleEnabled(ModuleType.SMART)`, and `CheckPasscode.handle` refuses a
+/// verification while `isOnCooldown()` holds. Without the module only the separate
+/// per-player 250 ms spam guard remains (not modelled in this port). The retry
+/// budget below is this port's form of that cooldown.
+#[must_use]
+pub fn cooldown_allows(smart: bool, throttle: &Throttle, now_ms: u64) -> bool {
+    !smart || throttle.allows(now_ms)
+}
+
+/// Records a wrong code against the smart-module cooldown budget.
+///
+/// Without the module upstream records nothing on the keypad, so no later install
+/// can inherit a lockout earned before it was there.
+pub fn cooldown_failed(smart: bool, throttle: &mut Throttle, now_ms: u64) {
+    if smart {
+        throttle.failed(now_ms);
+    }
+}
+
 /// One tick of the keypad's power countdown: the ticks left and whether the
 /// keypad turns its signal off now. Upstream schedules a block tick at
 /// `signalLength` when it powers on and clears `POWERED` there.
@@ -686,6 +709,51 @@ mod tests {
         assert!(
             throttle.allows(100),
             "four failures after a success do not lock"
+        );
+    }
+
+    #[test]
+    fn a_keypad_without_the_smart_module_has_no_cooldown() {
+        // Upstream applies a keypad cooldown only when the smart module is installed:
+        // `onIncorrectPasscodeEntered` calls `startCooldown()` under `isModuleEnabled(SMART)`.
+        let mut throttle = Throttle::default();
+        for attempt in 0..MAX_FAILED_ATTEMPTS {
+            assert!(
+                cooldown_allows(false, &throttle, u64::from(attempt)),
+                "attempt {attempt} on a keypad without the module is allowed"
+            );
+            cooldown_failed(false, &mut throttle, u64::from(attempt));
+        }
+        assert!(
+            cooldown_allows(false, &throttle, u64::from(MAX_FAILED_ATTEMPTS)),
+            "five wrong codes must not rate-limit a keypad without the smart module"
+        );
+        assert_eq!(
+            throttle,
+            Throttle::default(),
+            "no budget is recorded without the module"
+        );
+    }
+
+    #[test]
+    fn the_smart_module_gates_the_existing_retry_budget() {
+        let mut throttle = Throttle::default();
+        for attempt in 0..MAX_FAILED_ATTEMPTS {
+            cooldown_failed(true, &mut throttle, u64::from(attempt));
+        }
+        let locked = u64::from(MAX_FAILED_ATTEMPTS);
+        assert!(
+            !cooldown_allows(true, &throttle, locked),
+            "the module's fifth wrong code locks the session out"
+        );
+        assert!(
+            cooldown_allows(false, &throttle, locked),
+            "the same budget is ignored without the module"
+        );
+        throttle.succeeded();
+        assert!(
+            cooldown_allows(true, &throttle, locked),
+            "a correct code clears the module's budget"
         );
     }
 
