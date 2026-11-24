@@ -2,6 +2,7 @@
     "block.securitycraft.keypad": "Keypad",
     "item.securitycraft.keypad_item": "Key Panel",
     "block.securitycraft.keypad_barrel": "Passcode-protected Barrel",
+    "block.securitycraft.keypad_furnace": "Passcode-protected Furnace",
     "block.securitycraft.iron_door_reinforced": "Reinforced Door",
     "itemGroup.securitycraft": "SecurityCraft",
     "item.securitycraft.harming_module": "Harming Module",

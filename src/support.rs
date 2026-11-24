@@ -25,17 +25,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use mod_api::{
     BlockChangedEvent, BlockEntitySubmitEvent, BlockEntityTickEvent, BlockEntityUpdateTagEvent,
-    ClientHost, Compound, DrawContext, Host, HostTransaction, InteractionResult, ItemKey,
-    ItemPlace, ItemResource, ItemStack, LevelHost, LevelRef, LevelTickPostEvent, MenuButtonEvent,
-    ModContainer, OnBlockPlacedByEvent, RandomSource, Screen, ScreenClickEvent, ScreenDrawEvent,
-    ServerHost, StateForPlacementEvent, Tag, Text,
+    ClientHost, Compound, DrawContext, Host, HostTransaction, Identifier, InteractionResult,
+    ItemKey, ItemPlace, ItemResource, ItemStack, LevelHost, LevelRef, LevelTickPostEvent,
+    MenuButtonEvent, ModContainer, OnBlockPlacedByEvent, RandomSource, RecipeInput, RecipeMatch,
+    Screen, ScreenClickEvent, ScreenDrawEvent, ServerHost, StateForPlacementEvent, Tag, Text,
 };
 
 use crate::runtime::{
-    Action, Button, DEFAULT_SIGNAL_TICKS, Entry, ListData, Mode, Throttle, after_submit, button,
-    container_access, cooldown_allows, cooldown_failed, disguise_tint, facing_from_yaw, hash_code,
-    is_allowed, is_denied, may_install, may_set_code, new_salt, tick_signal, valid_code,
-    wrong_code_damage,
+    Action, Button, DEFAULT_SIGNAL_TICKS, Entry, FURNACE_FUEL, FURNACE_INPUT, FURNACE_OUTPUT,
+    FURNACE_SLOTS, FurnaceState, FurnaceTick, ListData, Mode, Throttle, after_submit, button,
+    container_access, cooldown_allows, cooldown_failed, disguise_tint, facing_from_yaw,
+    furnace_access, furnace_tick, hash_code, is_allowed, is_denied, may_install, may_set_code,
+    new_salt, tick_signal, valid_code, wrong_code_damage,
 };
 
 /// The keypad block; its item (`securitycraft:keypad_item`) places it.
@@ -47,6 +48,13 @@ pub(crate) const KEYPAD_ITEM: &str = "securitycraft:keypad_item";
 pub(crate) const CONTAINER: &str = "securitycraft:keypad_barrel";
 /// The block entity type of the passcode barrel.
 pub(crate) const CONTAINER_ENTITY: &str = "keypad_barrel";
+/// The passcode furnace (`securitycraft:keypad_furnace`), carried as a `minecraft:furnace`
+/// template with a three-slot input/fuel/output container and the matched smelting recipe.
+pub(crate) const FURNACE: &str = "securitycraft:keypad_furnace";
+/// The block entity type of the passcode furnace.
+pub(crate) const FURNACE_ENTITY: &str = "keypad_furnace";
+/// The furnace's three-slot content menu.
+pub(crate) const FURNACE_MENU: &str = "securitycraft:keypad_furnace";
 /// The vanilla 9×3 menu the barrel's 27 slots open, so hoppers, comparators,
 /// shift-clicks and a relaunch use the game's own container paths.
 pub(crate) const CONTAINER_MENU: &str = "securitycraft:keypad_barrel";
@@ -1405,6 +1413,14 @@ pub(crate) fn on_container_use(
     None
 }
 
+/// A right click on the passcode furnace uses the same one-shot gate as the barrel.
+pub(crate) fn on_furnace_use(
+    host: &mut dyn ServerHost,
+    click: &mod_api::BlockClick<'_>,
+) -> Option<InteractionResult> {
+    on_container_use(host, click)
+}
+
 /// The barrel's menu closed: spend the one-shot permission so a later right-click
 /// needs another code check (upstream closes and re-locks the container).
 pub(crate) fn on_barrel_container_closed(
@@ -1427,9 +1443,28 @@ pub(crate) fn on_barrel_container_closed(
     }
 }
 
-/// `/securitycraft cset <pos> <digits>`: sets a passcode barrel's first code.
+/// The furnace's menu closed: spend its one-shot open permission as the barrel does.
+pub(crate) fn on_furnace_container_closed(
+    host: &mut dyn ServerHost,
+    player: u128,
+    dimension: &str,
+    pos: [i32; 3],
+) {
+    on_barrel_container_closed(host, player, dimension, pos);
+}
+
+/// The label a harness command uses for a passcode container's id.
+fn passcode_label(block: &str) -> Option<&'static str> {
+    match block {
+        CONTAINER => Some("barrel"),
+        FURNACE => Some("furnace"),
+        _ => None,
+    }
+}
+
+/// `/securitycraft cset <pos> <digits>`: sets a passcode container's first code.
 /// The same owner rule as a keypad's `/securitycraft code`; the digest and salt
-/// are the port's own SHA-256, so a barrel's code survives a restart.
+/// are the port's own SHA-256, so a container's code survives a restart.
 fn set_container_code(
     host: &mut dyn ServerHost,
     level: LevelRef,
@@ -1440,20 +1475,19 @@ fn set_container_code(
     if !valid_code(code) {
         return Err("A code is four to twenty digits.".to_owned());
     }
-    if block_at(&*host, level, pos) != CONTAINER {
-        return Err("No passcode barrel at that position.".to_owned());
-    }
+    let label = passcode_label(&block_at(&*host, level, pos));
+    let label = label.ok_or_else(|| "No passcode container at that position.".to_owned())?;
     let entity = host
         .block_entity(level, pos)
-        .ok_or_else(|| "No passcode barrel at that position.".to_owned())?;
+        .ok_or_else(|| format!("No passcode {label} at that position."))?;
     let mut data = entity
         .data(&*host)
-        .ok_or_else(|| "No passcode barrel at that position.".to_owned())?;
+        .ok_or_else(|| format!("No passcode {label} at that position."))?;
     if has(&data, KEY_CODE) {
-        return Err("That barrel already has a code.".to_owned());
+        return Err(format!("That {label} already has a code."));
     }
     if !asking.is_some_and(|player| may_set_code(owner_of(&data), player)) {
-        return Err("Only the barrel's owner can set its code.".to_owned());
+        return Err(format!("Only the {label}'s owner can set its code."));
     }
     let salt = fresh_salt(host).ok_or_else(|| "No passcode barrel at that position.".to_owned())?;
     let digest = hash_code(code, &salt).unwrap_or_default();
@@ -1463,8 +1497,8 @@ fn set_container_code(
     set_int(&mut data, KEY_OPEN, 0);
     entity
         .replace_data(host, data)
-        .map_err(|_| "No passcode barrel at that position.".to_owned())?;
-    Ok("Barrel code set.".to_owned())
+        .map_err(|_| format!("No passcode {label} at that position."))?;
+    Ok(format!("{label} code set."))
 }
 
 /// `/securitycraft copen <pos> <digits>`: the barrel's code-check path. The
@@ -1478,54 +1512,73 @@ fn unlock_container(
     code: &str,
     asking: Option<u128>,
 ) -> Result<String, String> {
-    if block_at(&*host, level, pos) != CONTAINER {
-        return Err("No passcode barrel at that position.".to_owned());
-    }
+    let block = block_at(&*host, level, pos);
+    let label = passcode_label(&block)
+        .ok_or_else(|| "No passcode container at that position.".to_owned())?;
     let entity = host
         .block_entity(level, pos)
-        .ok_or_else(|| "No passcode barrel at that position.".to_owned())?;
+        .ok_or_else(|| format!("No passcode {label} at that position."))?;
     let mut data = entity
         .data(&*host)
-        .ok_or_else(|| "No passcode barrel at that position.".to_owned())?;
+        .ok_or_else(|| format!("No passcode {label} at that position."))?;
     let stored = string(&data, KEY_CODE);
     let salt = string(&data, KEY_SALT).unwrap_or_default();
-    let verdict = container_access(
-        owner_of(&data),
-        asking.unwrap_or(0),
-        stored.as_deref(),
-        &salt,
-        code,
-    );
-    match verdict {
-        crate::runtime::ContainerAccess::Open => {
-            set_int(&mut data, KEY_OPEN, 1);
-            set_int(&mut data, KEY_STATUS, STATUS_OPENED);
-            entity
-                .replace_data(host, data)
-                .map_err(|_| "The barrel could not open.".to_owned())?;
-            // The one-shot permission is consumed by the right-click that opens the
-            // container's own block-backed menu (`on_container_use`). Using the game's
-            // block menu, rather than a virtual menu `open_menu` would create, keeps the
-            // 27 item slots backed by this block entity: deposits and a relaunch persist.
-            Ok("Barrel unlocked.".to_owned())
+    if block == FURNACE {
+        if !furnace_access(
+            owner_of(&data),
+            asking.unwrap_or(0),
+            stored.as_deref(),
+            &salt,
+            code,
+        ) {
+            return Err(if owner_of(&data) != asking {
+                format!("Only the {label}'s owner may enter its code.")
+            } else if stored.is_none() {
+                format!("The {label} has no code set.")
+            } else {
+                "Wrong code.".to_owned()
+            });
         }
-        crate::runtime::ContainerAccess::NotOwner => {
-            Err("Only the barrel's owner may enter its code.".to_owned())
+    } else {
+        let verdict = container_access(
+            owner_of(&data),
+            asking.unwrap_or(0),
+            stored.as_deref(),
+            &salt,
+            code,
+        );
+        match verdict {
+            crate::runtime::ContainerAccess::Open => {}
+            crate::runtime::ContainerAccess::NotOwner => {
+                return Err(format!("Only the {label}'s owner may enter its code."));
+            }
+            crate::runtime::ContainerAccess::NoCode => {
+                return Err(format!("The {label} has no code set."));
+            }
+            crate::runtime::ContainerAccess::WrongCode => {
+                return Err("Wrong code.".to_owned());
+            }
         }
-        crate::runtime::ContainerAccess::NoCode => Err("The barrel has no code set.".to_owned()),
-        crate::runtime::ContainerAccess::WrongCode => Err("Wrong code.".to_owned()),
     }
+    set_int(&mut data, KEY_OPEN, 1);
+    set_int(&mut data, KEY_STATUS, STATUS_OPENED);
+    entity
+        .replace_data(host, data)
+        .map_err(|_| format!("The {label} could not open."))?;
+    // The one-shot permission is consumed by the right-click that opens the container's
+    // own block-backed menu (`on_container_use`). Using the game's block menu, rather
+    // than a virtual menu `open_menu` would create, keeps the item slots backed by
+    // this block entity: deposits and a relaunch persist.
+    Ok(format!("{label} unlocked."))
 }
 
-/// `/securitycraft cinfo <pos>`: the harness readout of a barrel's saved gate.
+/// `/securitycraft cinfo <pos>`: the harness readout of a passcode container's saved gate.
 fn container_info(host: &dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Option<String> {
-    if block_at(host, level, pos) != CONTAINER {
-        return None;
-    }
+    let label = passcode_label(&block_at(host, level, pos))?;
     let entity = host.block_entity(level, pos)?;
     let data = entity.data(host)?;
     Some(format!(
-        "securitycraft barrel {} {} {} code={} open={} owner={}",
+        "securitycraft {label} {} {} {} code={} open={} owner={} lit={}",
         pos[0],
         pos[1],
         pos[2],
@@ -1536,7 +1589,199 @@ fn container_info(host: &dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Opti
         } else {
             "none"
         },
+        if read_furnace_state(&data).is_burning() {
+            "true"
+        } else {
+            "false"
+        },
     ))
+}
+
+// --- the passcode furnace --------------------------------------------------
+
+/// The furnace's screen: input and fuel above, the take-only output below, with the
+/// vanilla furnace's four data slots (flame and arrow) driven by the tick.
+pub(crate) fn furnace_screen() -> Screen {
+    Screen {
+        width: 176.0,
+        height: 166.0,
+        slots: vec![
+            Some([56.0, 17.0]),  // input
+            Some([56.0, 53.0]),  // fuel
+            Some([116.0, 35.0]), // output
+        ],
+        inventory_y: 84.0,
+        inventory_x: 8.0,
+        own_labels: false,
+        own_background: false,
+        ..Screen::default()
+    }
+}
+
+/// The furnace's container: input, fuel and output reachable from every face; hoppers
+/// feed the first two and take from the last. The game's `minecraft:furnace` menu shows it.
+pub(crate) fn furnace_container() -> ModContainer {
+    let all = vec![FURNACE_INPUT, FURNACE_FUEL, FURNACE_OUTPUT];
+    ModContainer {
+        slots: FURNACE_SLOTS,
+        faces: std::array::from_fn(|_| all.clone()),
+        inputs: vec![FURNACE_INPUT, FURNACE_FUEL],
+        outputs: vec![FURNACE_OUTPUT],
+        menu: Some(FURNACE_MENU.to_owned()),
+    }
+}
+
+/// The saved furnace timing keys, named after `AbstractFurnaceBlockEntity`'s int fields.
+const FURNACE_BURN: &str = "furnace_burn";
+const FURNACE_BURN_TOTAL: &str = "furnace_burn_total";
+const FURNACE_COOK: &str = "furnace_cook";
+const FURNACE_COOK_TOTAL: &str = "furnace_cook_total";
+
+fn read_furnace_state(nbt: &Compound) -> FurnaceState {
+    FurnaceState {
+        burn: int(nbt, FURNACE_BURN),
+        burn_total: int(nbt, FURNACE_BURN_TOTAL),
+        progress: int(nbt, FURNACE_COOK),
+        total: int(nbt, FURNACE_COOK_TOTAL),
+    }
+}
+
+fn write_furnace_state(nbt: &mut Compound, state: FurnaceState) {
+    set_int(nbt, FURNACE_BURN, state.burn);
+    set_int(nbt, FURNACE_BURN_TOTAL, state.burn_total);
+    set_int(nbt, FURNACE_COOK, state.progress);
+    set_int(nbt, FURNACE_COOK_TOTAL, state.total);
+}
+
+/// The game's own smelting recipe for one input stack (a data pack's recipe included).
+fn smelting(host: &dyn Host, level: LevelRef, stack: &ItemStack) -> Option<RecipeMatch> {
+    static SMELTING: OnceLock<Option<Identifier>> = OnceLock::new();
+    let kind = SMELTING
+        .get_or_init(|| Identifier::parse("minecraft:smelting").ok())
+        .as_ref()?;
+    level
+        .recipe_for(host, kind, &RecipeInput::Single(stack.clone()))
+        .ok()
+        .flatten()
+}
+
+/// Take one fuel item, keeping its crafting remainder (a lava bucket leaves a bucket).
+fn consume_furnace_fuel(host: &dyn Host, items: &mut [Option<ItemStack>]) {
+    let Some(fuel) = items.get(FURNACE_FUEL).and_then(|slot| slot.clone()) else {
+        return;
+    };
+    let remainder_stack = host.item_crafting_remainder(&fuel);
+    let Some(slot) = items.get_mut(FURNACE_FUEL) else {
+        return;
+    };
+    let left = slot
+        .as_ref()
+        .map_or(0, |stack| stack.count().saturating_sub(1));
+    if left == 0 {
+        *slot = remainder_stack;
+    } else if let Some(mut stack) = slot.clone()
+        && stack.set_count(left).is_ok()
+    {
+        *slot = Some(stack);
+    }
+}
+
+/// Move one input into the output slot and consume one input item.
+fn smelt_furnace_item(items: &mut [Option<ItemStack>], result: &ItemStack) {
+    match items.get_mut(FURNACE_OUTPUT).and_then(|slot| slot.as_mut()) {
+        Some(output) => {
+            let _ = output.set_count(output.count().saturating_add(result.count()));
+        }
+        None => items[FURNACE_OUTPUT] = Some(result.clone()),
+    }
+    if let Some(Some(mut input)) = items.get(FURNACE_INPUT).cloned() {
+        let left = input.count().saturating_sub(1);
+        if left == 0 {
+            items[FURNACE_INPUT] = None;
+        } else if input.set_count(left).is_ok() {
+            items[FURNACE_INPUT] = Some(input);
+        }
+    }
+}
+
+/// One server tick of the passcode furnace: cook against the game's smelting table, burn the fuel
+/// slot, write the four saved timing ints and follow `lit` with `isBurning`. The code gate is the
+/// open permission; once the menu is open the machine runs exactly as upstream's furnace does.
+pub(crate) fn on_furnace_tick(host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
+    let pos = event.pos;
+    let Some(level) = in_place_level(host) else {
+        return;
+    };
+    if event.entity.items.len() < FURNACE_SLOTS {
+        event.entity.items.resize(FURNACE_SLOTS, None);
+    }
+    if event.entity.data.len() < 4 {
+        event.entity.data.resize(4, 0);
+    }
+    let recipe = event
+        .entity
+        .items
+        .get(FURNACE_INPUT)
+        .and_then(|slot| slot.as_ref())
+        .and_then(|stack| smelting(&*host, level, stack));
+    let recipe_time = recipe.as_ref().map(|matched| matched.processing_time);
+    let result = recipe.as_ref().map(|matched| matched.output.clone());
+    let stored = event
+        .entity
+        .items
+        .get(FURNACE_OUTPUT)
+        .and_then(|slot| slot.as_ref());
+    let output_ok = match (&result, stored) {
+        (Some(_), None) => true,
+        (Some(result), Some(stored)) => {
+            let max = host.max_stack_size(result.item()).unwrap_or(64).min(64);
+            stored.same_item(result)
+                && stored.same_components(result)
+                && stored.count().saturating_add(result.count()) <= max
+        }
+        (None, _) => false,
+    };
+    let fuel_time = event
+        .entity
+        .items
+        .get(FURNACE_FUEL)
+        .and_then(|slot| slot.as_ref())
+        .and_then(|fuel| host.item_burn_time(fuel.item()))
+        .map_or(0, |ticks| ticks.max(0) as u32);
+    let has_input = event
+        .entity
+        .items
+        .get(FURNACE_INPUT)
+        .is_some_and(|slot| slot.as_ref().is_some_and(|stack| stack.count() > 0));
+
+    let mut state = read_furnace_state(&event.entity.nbt);
+    let step = furnace_tick(
+        &mut state,
+        FurnaceTick {
+            has_input,
+            recipe_time,
+            fuel_time,
+            output_ok,
+        },
+    );
+    if step.consume_fuel {
+        consume_furnace_fuel(&*host, &mut event.entity.items);
+    }
+    if step.smelt
+        && let Some(result) = &result
+    {
+        smelt_furnace_item(&mut event.entity.items, result);
+    }
+    write_furnace_state(&mut event.entity.nbt, state);
+    event.entity.data[0] = state.burn;
+    event.entity.data[1] = state.burn_total;
+    event.entity.data[2] = state.progress;
+    event.entity.data[3] = state.total;
+    let _ = host.set_block_property(
+        pos,
+        "lit",
+        if state.is_burning() { "true" } else { "false" },
+    );
 }
 
 /// The UUID `/securitycraft owner … stranger` writes: no player has it, so the

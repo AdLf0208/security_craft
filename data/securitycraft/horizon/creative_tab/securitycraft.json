@@ -4,6 +4,7 @@
   "items": [
     "securitycraft:keypad_item",
     "securitycraft:keypad_barrel",
+    "securitycraft:keypad_furnace",
     "securitycraft:iron_door_reinforced",
     "securitycraft:harming_module",
     "securitycraft:allowlist_module",

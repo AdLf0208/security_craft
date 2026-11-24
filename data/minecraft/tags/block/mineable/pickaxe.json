@@ -3,6 +3,7 @@
   "values": [
     "securitycraft:keypad",
     "securitycraft:keypad_barrel",
+    "securitycraft:keypad_furnace",
     "securitycraft:iron_door_reinforced"
   ]
 }

@@ -1,7 +1,7 @@
 # Validation
 
-The current package is the flat SDK package (mod API 0.2) at version **0.2.10**, validated on
-Linux with rustc 1.95.0 on 2026-11-24 against Horizon
+The current package is the flat SDK package (mod API 0.2) at version **0.2.11** (the passcode
+furnace slice), validated on Linux with rustc 1.95.0 on 2026-11-24 against Horizon
 `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` / horizon-mixins
 `e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. All Rust steps ran through **forwarded**
 `ports/tools/build-slot.sh` leases on `AdLf-PC` (`build-slot: forwarding … to the remote runner`,
@@ -9,6 +9,39 @@ relative `--port ports/securitycraft`); the launcher build and game legs stayed 
 remote box has no launcher, no prepared 26.3 resources and no renderer for this `--offscreen` e2e.
 `CARGO_INCREMENTAL=0` throughout; **no `BUILD_LOCAL=1`**. Evidence is under
 `../_shared/evidence/securitycraft/` and `../_shared/evidence/securitycraft-e2e/`.
+
+## Slice 11 — the passcode furnace (0.2.11)
+
+| Check | Result |
+|---|---|
+| Red (`furnace_access`/`furnace_tick` stubbed) | 57 passed / 2 failed, both new assertions (`slice10-red.log`) |
+| `cargo test --offline` | **59 passed**, 0 failed (`slice10-test.log`, `sdk-test.log`) |
+| `cargo fmt --check` + `cargo clippy --all-targets --offline -- -D warnings` | Pass, 0 warnings (`slice10-lint.log`) |
+| Two `cargo horizon-mod build`s + `cmp` | byte-identical, `rm -f Cargo.lock` before each (`slice10-build*.log`) |
+| `cargo horizon-mod check securitycraft.hmod` | `0.2.11 (native-mod, … for 26.3)`, EXIT 0 (`slice10-check-fits.log`) |
+| `fits --build 0a875da` / `--build 0b14f8a` | `made for` / `fits`, delivered SHA in both (`slice10-check-fits.log`) |
+| `verify-sdk-package.py securitycraft` | 1/1, `package matches the tree`, 59 tests, no lock (`slice10-verify-sdk-package.log`) |
+| Launcher build | `Compiling securitycraft (1 of 1)` (`slice10-launcher-build.log`) |
+| In-game scenario (`tools/e2e.sh`, launcher-built game) | **PASS + `EXIT:0`**, all 20 phases incl. phase 20 (`securitycraft-e2e/e2e-launcher.log`) |
+| Control (unmodified Nightly) | `EXIT:1` at phase 1 (`e2e-control.log`) |
+| Ids-unknown control (`CONTROL=1`) | PASS + `EXIT:0`, ids unknown (`e2e-ids-unknown.log`) |
+| `SELFTEST=furnace` | `EXIT:1` at phase 20 (`e2e-selftest-furnace.log`) |
+| Prior SELFTESTs (`1`, `harming`, `nonloot`, `owner`, `relaunch`, `allow`, `deny`, `smart`, `disguise`, `container`) | `EXIT:1` at each own assertion (`e2e-selftest*.log`) |
+| `check-e2e-logs.py securitycraft-e2e --strict` | `logs=17 ok=17`, exit 0 (`slice10-check-e2e-logs.log`) |
+| `check-recipe-types.py securitycraft` | `securitycraft: ok`, exit 0 |
+
+The delivered package is `securitycraft.hmod` **95,921 B**, SHA-256
+`b3271e8884e04fc0a878eaf90a171bb7d49f8a6c34f36c94993448879a7e6f67`, **95 entries**, version
+**0.2.11**, SDK-only dependency set (R9) and no packed `Cargo.lock`. The launcher build printed
+`Compiling securitycraft (1 of 1)` after the stale 0.2.10 tag was moved aside. `sdk-test.log` was
+regenerated on the final 0.2.11 tree (59 tests) before the last `verify-sdk-package.py` run, which
+reports `package matches the tree`.
+
+The furnace phase proves the carried `keypad_furnace`: an unprotected vanilla furnace opens without
+a code; a wrong `copen` leaves the passcode furnace closed with no slots; the right code opens its
+three-slot block-backed menu; raw iron and coal cook into one iron ingot with the input consumed
+and `lit=true`; and the code and output survive a relaunch. `SELFTEST=furnace` inverts the
+wrong-code assertion and fails exactly there.
 
 ## Slice 9 — the passcode barrel (0.2.10)
 

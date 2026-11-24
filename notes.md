@@ -2288,3 +2288,263 @@ holding eight ingots. The differential is a vanilla chest at the same position
 assertion and must end `EXIT:1`. If the chest's entity-rendered lid cannot be
 expressed at this pin, stop with `blocked(<symbol>)` and evidence rather than
 inventing a renderer.
+
+## Slice 10 — the passcode chest is `blocked(register_block_entity_renderers)` (2026-11-24)
+
+**Outcome: STOP at the artefact-inventory gate.** No version bump, no build, no
+package, no e2e. The delivered package stays **0.2.10**
+(`2829d08f…41841`) and its evidence stays as recorded in slice 9. The brief's
+own stop condition applied: the chest needs an entity renderer the pin cannot
+express, and substituting a `minecraft:chest`-template fake was explicitly
+forbidden. Surface evidence:
+[`slice10-chest-blocked-surface.log`](../../_shared/evidence/securitycraft/slice10-chest-blocked-surface.log).
+
+### Artefact inventory (the jar, not the mod's name)
+
+From `securitycraft-1.10.2.1.jar` (SHA-1 `8760079e…3251`), the chest family is:
+
+- `assets/securitycraft/blockstates/keypad_chest.json` — 4 `facing` variants,
+  one model `securitycraft:block/keypad_chest`.
+- `assets/securitycraft/models/block/keypad_chest.json` — **`"parent":
+  "builtin/entity"`**, only a `particle` texture (`block/iron_block`). No cube
+  geometry, no textured elements — unlike the barrel's carried cube model.
+- `assets/securitycraft/models/item/keypad_chest.json` — **`"parent":
+  "builtin/entity"`**, display transforms only.
+- Ten `assets/securitycraft/textures/entity/chest/*.png`: `active`,
+  `inactive`, `left_active`, `left_inactive`, `right_active`,
+  `right_inactive`, `christmas{,_left,_right}` (all 16×16).
+- `net/geforcemods/securitycraft/renderers/KeypadChestRenderer.class` and
+  `KeypadChestItemRenderer.class`, plus `KeypadChestBlockEntity.class` and the
+  `KeypadChestBlock$Convertible` double-chest class.
+
+The visible chest — the lid, its open/closed angle, the active/inactive and
+left/right texture swap — is **entirely drawn by the two Java entity renderers**.
+There is no static JSON mesh to carry; `builtin/entity` delegates the block's
+geometry to a `BlockEntityRenderer` and the item's to an item renderer.
+
+### The missing pin surface (measured, not assumed)
+
+- The SDK's only render-registration hooks are `register_debug_renderers`,
+  `register_entity_renderers` (entity **types**), `register_render_pipelines`
+  and `register_special_model_renderer` (`minecraft:special` **item** models).
+  There is **no `register_block_entity_renderers`** hook; the only block-entity
+  render surface is `block_entity_render_bounding_box` (a bounds answer, not
+  geometry). `surface.json` at `0a875da` was enumerated in full.
+- The content `Block` declaration (`horizon-mods/src/content.rs`) has no renderer
+  or texture-override field; block visuals come from the vanilla template plus
+  the carried blockstate/model assets.
+- The game has **no `builtin/entity` handling** anywhere in `horizon/crates/`,
+  so carrying the jar's block/item model would draw no geometry from the chunk
+  mesh.
+- The game's block-entity chest renderer classifies by the block state's **own
+  id** (`classify(&s.name, …)`) and matches only vanilla names (`chest`,
+  `trapped_chest`, `ender_chest`, the copper chests); a `securitycraft:keypad_chest`
+  block is not a chest to it. Those vanilla names use **hardcoded** textures
+  `entity/chest/normal{,_left,_right}`; there is no state-driven
+  active/inactive swap for a content block and no SDK binding for the mod's
+  `entity/chest/*.png` textures.
+
+Generic world-geometry hooks (`add_section_geometry`, `submit_custom_geometry`)
+could only draw a hand-built mesh — i.e. inventing a renderer, which the brief
+forbids — and still would not give the item's `builtin/entity` model a draw path.
+
+### Why this is blocked rather than a thinner slice
+
+The pure `container_access` rule, the one-shot gate, the 27-slot menu and the
+harness commands are all reusable, but they port the **mechanics**, not the
+chest. The artefact's defining content is the entity-rendered lid; a
+`minecraft:chest`-template block carrying the mod's textures unused would be the
+"fake barrel" the brief rules out, and the parity rule would list its entire
+visual family as dead data. Stopping here keeps the recorded 0.2.10 package and
+its 16 green e2e logs intact.
+
+### Next slice proposal
+
+The same gap line (*"…chest/barrel/**furnace/smoker**…"*): the **passcode
+furnace/smoker** (`securitycraft:keypad_furnace`, `keypad_smoker`). Unlike the
+chest, the pin has first-class `minecraft:furnace`/`minecraft:smoker`/
+`minecraft:blast_furnace` container templates with cook-time machine behaviour
+(`horizon-client-render::containers::FurnaceKind`, `recipe_type()`), so their lit
+states and cook timers are expressible without a new renderer. Before dispatch
+the next agent must inventory the furnace's blockstate/models/textures in the
+jar and confirm the template's lit-state property names match 26.3, stopping
+with `blocked(<symbol>)` if the artefact again needs a renderer.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices (no Rust change — artefact/surface audit only)
+
+## Slice 11 — the passcode furnace (2026-11-24, SDK `0a875da`) — 0.2.11
+
+**Slice and gap line.** The brief's own line, from slice 10's proposal and the port's gap list:
+*"the passcode chest/barrel/**furnace/smoker**, keypad door and trapdoor"*. The chest stays
+`blocked(register_block_entity_renderers)` (slice 10, measured — `builtin/entity` plus Java
+renderers, no pin surface); this slice takes the **passcode furnace**
+(`securitycraft:keypad_furnace`). Class **content**, tier **deep** in the ledger; the delivered
+shape is the port's existing **logic + machines** half (block entity, container menu, redstone-free
+one-shot gate) plus one carried block with cook-time state — no renderer, no new hook kind, no
+re-tiering.
+
+### Artefact inventory first (the gate the brief requires)
+
+From the jar (`securitycraft-1.10.2.1.jar`, SHA-1 `8760079e…3251`), the `keypad_furnace` family:
+
+| File | What the artefact contains |
+|---|---|
+| `assets/securitycraft/blockstates/keypad_furnace.json` | 16 variants: `facing`(4) × `lit`(2) × `open`(2), models `keypad_furnace_{closed,closed_lit,open,open_lit}` with quarter-turn `y` |
+| `assets/securitycraft/models/block/base_keypad_furnace_closed.json` / `_open.json` | `"parent": "block/block"`, **10 `elements` with real cube geometry**, `render_type: cutout`, `#window`/`#furnace`/`#keypad` textures |
+| the four `keypad_furnace_*` block models | parents to the two bases; `#furnace` = `block/furnace_front` / `block/furnace_front_on` (vanilla 26.3 textures), `#window` = the mod's window |
+| `assets/securitycraft/models/item/keypad_furnace.json` | parents to `keypad_furnace_open` (a block model), display transforms only |
+| five `assets/securitycraft/textures/block/keypad_furnace_*.png` | bottom, side, top_active, top_inactive, window (16×16) |
+| `data/securitycraft/loot_table/blocks/keypad_furnace.json` | survives-explosion pool dropping `securitycraft:keypad_furnace` with `copy_components(custom_name)` |
+
+**No model is `builtin/entity`** — checked with a per-file grep over all twelve furnace and smoker
+block/item models (`slice10-furnace-inventory.log`): every one is `CLEAN`. The visible machine is a
+static JSON mesh, unlike the chest (slice 10's blocker). **The lit-state property matches 26.3**:
+the prepared `assets/minecraft/blockstates/furnace.json` has exactly `facing` × `lit`, and its
+`textures/block/furnace_front{,_on}.png` are present. The jar's extra `open` property has no 26.3
+counterpart, so the carried blockstate keeps the 8 `facing`/`lit` variants and the closed mesh for
+both (the lid-open art is not expressible — recorded as a deviation). This is the same trim the
+barrel's `frog`/`lid_facing` needed.
+
+**Choice — furnace, not smoker.** The jar's smoker reuses `base_keypad_furnace_{closed,open}` and
+adds only its own `keypad_smoker_window` texture, its own 16-variant blockstate and its own id/loot;
+the furnace is the base artefact, has the full five-texture set, and is the first named in the gap
+line. Both are expressible (the pin stamps `FurnaceKind::{Furnace,Smoker}` container behaviour —
+`horizon-client-render::containers::FurnaceKind::recipe_type()`), so the cheaper, canonical furnace
+is ported and the smoker stays a gap.
+
+**Cook behaviour — expressible without a renderer.** `FurnaceKind::from_block` only classifies
+vanilla ids, so a mod block gets a `BlockEntity::Mod`, not the engine's furnace BE; but the SDK
+exposes everything the port needs: `Registrar::block_container`, `LevelRef::recipe_for` (the
+engine's `minecraft:smelting` matcher), `Host::item_burn_time`, `Host::item_crafting_remainder` and
+`set_block_property("lit", …)`. `ironfurnaces` already proves this exact pattern at this pin, so
+the port drives cooking from its own block-entity tick with the game's own recipes and fuel values.
+
+### Red proof (TDD, before the rule or glue existed)
+
+`src/runtime.rs` gained `FurnaceState`/`FurnaceTick`/`FurnaceStep` and two tests, with
+`furnace_access` stubbed to `false` and `furnace_tick` stubbed to `FurnaceStep::default()`. The
+forwarded test step (`slice10-red.log`) failed:
+
+```
+---- runtime::tests::a_furnace_opens_for_its_owner_with_the_right_code stdout ----
+
+thread 'runtime::tests::a_furnace_opens_for_its_owner_with_the_right_code' (948881) panicked at src/runtime.rs:1309:9:
+the owner with the right code opens the furnace
+
+---- runtime::tests::a_furnace_smelt_finishes_after_the_matched_recipes_time stdout ----
+
+thread 'runtime::tests::a_furnace_smelt_finishes_after_the_matched_recipes_time' (948882) panicked at src/runtime.rs:1344:9:
+the input smelts once the matched recipe's cooking time has passed
+
+test result: FAILED. 57 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+The access rule became the existing owner-then-salted-digest verdict for the new id; the cook rule
+became the burn/cook timer that smelts one input when the matched recipe's time completes. All
+**59** tests then passed.
+
+### What the slice implements
+
+- **Pure rules** (`runtime::furnace_access`, `furnace_tick`, `FurnaceState`/`FurnaceTick`): owner
+  before digest, and `AbstractFurnaceBlockEntity.serverTick`'s burn/cook/consume/smelt branch with
+  no SDK types in `runtime.rs`.
+- **Content**: `securitycraft:keypad_furnace` (the jar's block/item ids, 8-state blockstate, six
+  models, five 16×16 textures, simplified loot, lang and creative-tab entry, pickaxe tag), plus a
+  three-slot `securitycraft:keypad_furnace` menu and a drawn input/fuel/output panel.
+- **The gate**: the same one-shot saved permission as the barrel — a wrong `copen` ends the click
+  before the content block opens its menu, so the machine shows no slots; the right code grants one
+  session, spent at menu close. The harness commands `cset`/`copen`/`cinfo` now dispatch by id and
+  report `securitycraft barrel …` / `securitycraft furnace …`.
+- **The cook tick**: matches `minecraft:smelting` for the input slot through `LevelRef::recipe_for`,
+  reads the fuel slot's burn time through `Host::item_burn_time`, advances the four saved timing
+  ints, consumes fuel, smelts one input into the output slot, and sets `lit` from `is_burning`. The
+  saved ints and item slots survive a relaunch.
+
+### Deviations recorded by this slice
+
+1. **The `open` blockstate property is trimmed.** 26.3's furnace has only `facing` and `lit`; the
+   jar's lid-open art (`base_keypad_furnace_open` and its models) is carried but unreferenced by the
+   blockstate. The visible lid angle is not expressible; the menu opening is the observable "open".
+2. **The loot table is simplified** to a survives-explosion drop of the furnace item, without the
+   jar's `copy_components` custom-name transfer (as the barrel's was).
+3. **The code check is a harness command** (`cset`/`copen`/`cinfo`), not a drawn second screen, as
+   for every other passcode family in this port.
+4. **Modules install on keypads only**, not on the furnace; upstream's per-container module lists
+   remain a gap.
+
+### Verification (0.2.11, SDK `0a875da`, 2026-11-24)
+
+Every Rust step ran through forwarded `build-slot.sh` leases on `AdLf-PC`
+(`build-slot: forwarding … to the remote runner`, relative `--port ports/securitycraft`,
+`CARGO_INCREMENTAL=0`, **no `BUILD_LOCAL=1`**); the launcher build and the game legs stayed local
+(the e2e is `--offscreen`). Evidence under `../_shared/evidence/securitycraft/` and
+`../_shared/evidence/securitycraft-e2e/`.
+
+| Check | Evidence | Result |
+|---|---|---|
+| Red | `slice10-red.log` | **57 passed / 2 failed**, both new furnace assertions |
+| Tests | `slice10-test.log`, `sdk-test.log` (regenerated for 0.2.11) | **59 passed**, 0 failed |
+| Format + lints | `slice10-lint.log` | exit 0, **0 warnings**, fmt clean |
+| Two builds + `cmp` | `slice10-build.log` | **byte-identical**; `rm -f Cargo.lock` before each |
+| Delivered | `securitycraft.hmod` | **95,921 B**, SHA-256 `b3271e8884e04fc0a878eaf90a171bb7d49f8a6c34f36c94993448879a7e6f67`, **95 entries**, no `Cargo.lock`, version 0.2.11 |
+| Registry check | `slice10-check-fits.log` | `securitycraft 0.2.11 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, same SHA, EXIT 0 |
+| Pinned build | `slice10-check-fits.log` | `0a875da  made for`, EXIT 0 |
+| Another build | `slice10-check-fits.log` | `0b14f8a  fits`, EXIT 0, same SHA |
+| Gate | `slice10-verify-sdk-package.log` | **1/1**, incl. `package matches the tree`, SDK-only deps, no lock, 59 tests |
+| Launcher build | `slice10-launcher-build.log` | stale 0.2.10 tag moved aside, `Compiling securitycraft (1 of 1)`, `native-0a875da-9c1c70931f1c built` |
+| In-game PASS | `securitycraft-e2e/e2e-launcher.log` | **PASS + `EXIT:0`**, all 20 phases incl. phase 20 |
+| Control (unmodified Nightly) | `e2e-control.log` | **`EXIT:1`** at phase 1 |
+| Ids-unknown control | `e2e-ids-unknown.log` | PASS + `EXIT:0`, ids unknown |
+| SELFTEST (furnace) | `e2e-selftest-furnace.log` | **`EXIT:1`** at phase 20, "expected a wrong code to leave the furnace's contents unreadable" |
+| Prior SELFTESTs (door/harm/nonloot/owner/relaunch/allow/deny/smart/disguise/container) | `e2e-selftest*.log` | **`EXIT:1`** at each own assertion |
+| Log checker | `slice10-check-e2e-logs.log` | `logs=17 ok=17`, exit 0 |
+| Recipe types | `check-recipe-types.py securitycraft` | `securitycraft: ok`, exit 0 |
+
+Phase 20 in the PASS leg (`e2e-launcher.log`):
+
+```
+unprotected vanilla furnace container slots: 3
+coded furnace: securitycraft furnace 24 101 12 code=set open=0 owner=set lit=false
+wrong-code furnace click: screen=playing container slots=0
+after the right furnace code: securitycraft furnace 24 101 12 code=set open=1 owner=set lit=false
+unlocked furnace container slots: 3
+furnace output slot 302: minecraft:iron_ingot x1
+furnace state while burning: securitycraft:keypad_furnace[facing=west,lit=true]
+furnace input slot 300 after the cook: empty
+furnace output slot 302 after the relaunch: minecraft:iron_ingot
+PASS-furnace: the passcode furnace saved its owner and code, a wrong code left no menu and no slots, the right code opened its three-slot block-backed menu, raw iron and coal cooked into one iron ingot with the input consumed and lit=true, and the code and output survived a relaunch; an unprotected vanilla furnace opened with no code
+```
+
+The wrong-code pair (slots 0, `screen=playing`) is fail-capable: `SELFTEST=furnace` inverts it and
+fails at `EXIT:1`. The vanilla furnace at the same position opens with no code (differential). The
+cook is driven by the game's own `minecraft:smelting` matcher and coal's burn time; the input is
+consumed and the single iron ingot is read back from slot 302 before and after the relaunch.
+`ctl messages` stays at **8** throughout (the widened `30` broke phase 2 in slice 8). The
+pre-existing phase-11b module-stash flake did not recur in this wave's legs.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-review, rust-port
+
+## Next slice
+
+**Family:** the **passcode smoker** (`securitycraft:keypad_smoker`), the remaining member of the
+gap line *"the passcode chest/barrel/**furnace/smoker**, keypad door and trapdoor"* now that the
+furnace is proved. It fits tier **deep** in the same logic+machines shape: the jar's 16-variant
+`facing`/`lit` blockstate, its `keypad_smoker_*` models (which parent to the carried
+`base_keypad_furnace_*` meshes) and its `keypad_smoker_window` texture, a second block id with the
+same three-slot input/fuel/output container, the same `container_access`/`furnace_tick` rules and
+the same harness commands; only the recipe type changes (`minecraft:smoking` instead of
+`minecraft:smelting`, via `FurnaceKind::Smoker::recipe_type()`), so the same pure rule with a
+different kind and a shorter cook time. No new renderer or hook kind.
+
+**In-game assertion that would prove it:** place a passcode smoker beside the player with an
+adjacent vanilla smoker as the no-code differential; `cset` a code as owner, confirm a wrong
+`copen` leaves `open=0`, `screen=playing` and zero container slots; the right code must open three
+slots, then `item replace block … container.0 with minecraft:raw_iron` and `container.1 with
+minecraft:coal`, tick ~120 ticks (smoking is half the smelting time) and read slot 302 back as
+`minecraft:iron_ingot x1` with `lit=true` and the input consumed, surviving a relaunch.
+`SELFTEST=smoker` must invert the wrong-code/no-slots assertion and end `EXIT:1`. If the jar's
+smoker model turns out to need a renderer, stop with `blocked(<symbol>)` instead of faking it.
+
+The **keypad door and trapdoor**, the universal block modifier and the reinforced-block family
+stay behind the smoker; the chest remains `blocked(register_block_entity_renderers)` until the pin
+stamps a block-entity renderer surface.

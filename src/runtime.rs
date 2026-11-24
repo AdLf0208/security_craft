@@ -696,6 +696,102 @@ fn sha256_compress(state: &mut [u32; 8], block: &[u8]) {
     }
 }
 
+// --- the passcode furnace (slice 10) ---------------------------------------
+
+/// The passcode furnace's three slots: input, fuel and output.
+pub const FURNACE_INPUT: usize = 0;
+pub const FURNACE_FUEL: usize = 1;
+pub const FURNACE_OUTPUT: usize = 2;
+pub const FURNACE_SLOTS: usize = 3;
+
+/// The saved furnace timing, as `AbstractFurnaceBlockEntity`'s four int fields.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FurnaceState {
+    pub burn: i32,
+    pub burn_total: i32,
+    pub progress: i32,
+    pub total: i32,
+}
+
+impl FurnaceState {
+    /// A furnace is lit only while fuel is burning.
+    pub fn is_burning(self) -> bool {
+        self.burn > 0
+    }
+}
+
+/// What one tick asks the glue to do besides advancing the saved state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FurnaceStep {
+    pub consume_fuel: bool,
+    pub smelt: bool,
+}
+
+/// The world facts one passcode-furnace tick reads.
+#[derive(Clone, Copy, Debug)]
+pub struct FurnaceTick {
+    pub has_input: bool,
+    pub recipe_time: Option<u32>,
+    pub fuel_time: u32,
+    pub output_ok: bool,
+}
+
+/// The owner-and-code verdict for a passcode container's new id. Upstream's
+/// `IPasscodeProtected.verifyPasscodeSet` and `CheckPasscode.handle` check the owner first, then
+/// the salted digest; this is that rule for the furnace id, kept as its own symbol so the two
+/// passcode families' call sites cannot drift apart silently.
+pub fn furnace_access(
+    owner: Option<u128>,
+    player: u128,
+    stored: Option<&str>,
+    salt: &str,
+    code: &str,
+) -> bool {
+    // Upstream checks ownership before it compares a digest; the passcode container rule already
+    // models both gates, so this id uses the same verdict (Open is the only grant).
+    container_access(owner, player, stored, salt, code) == ContainerAccess::Open
+}
+
+/// `AbstractFurnaceBlockEntity.serverTick`'s furnace branch, in the pure form: burn fuel, advance
+/// the cook timer against the matched recipe's time and smelt one input when it completes.
+pub fn furnace_tick(state: &mut FurnaceState, input: FurnaceTick) -> FurnaceStep {
+    let mut step = FurnaceStep::default();
+    if state.burn > 0 {
+        state.burn -= 1;
+    }
+    // The furnace cooks at the recipe's own speed (no tier scaling here).
+    if let Some(recipe_time) = input.recipe_time {
+        state.total = recipe_time.max(1) as i32;
+    }
+    let burning = state.burn > 0;
+    let valid = input.has_input && input.recipe_time.is_some() && input.output_ok;
+    if burning || (input.fuel_time > 0 && input.has_input) {
+        if !burning && valid {
+            let burn = input.fuel_time;
+            if burn > 0 {
+                state.burn = burn as i32;
+                state.burn_total = burn as i32;
+                step.consume_fuel = true;
+            }
+        }
+        if state.burn > 0 && valid {
+            state.progress += 1;
+            if state.progress >= state.total.max(1) {
+                state.progress = 0;
+                if let Some(recipe_time) = input.recipe_time {
+                    state.total = recipe_time.max(1) as i32;
+                }
+                step.smelt = true;
+            }
+        } else {
+            state.progress = 0;
+        }
+    } else if state.burn <= 0 && state.progress > 0 {
+        state.progress = (state.progress - 2).clamp(0, state.total.max(0));
+    }
+    step
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1235,5 +1331,52 @@ mod tests {
             Some(DISGUISE_TINT),
             "the disguise module tints the keypad even beside other modules"
         );
+    }
+
+    #[test]
+    fn a_furnace_opens_for_its_owner_with_the_right_code() {
+        let owner = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef_u128;
+        let stranger = 0xdead_beef_dead_beef_dead_beef_dead_beef_u128;
+        let digest = hash_code("1234", SALT).unwrap();
+        assert!(
+            furnace_access(Some(owner), owner, Some(&digest), SALT, "1234"),
+            "the owner with the right code opens the furnace"
+        );
+        assert!(
+            !furnace_access(Some(owner), owner, Some(&digest), SALT, "9999"),
+            "a wrong code leaves the passcode furnace closed"
+        );
+        assert!(
+            !furnace_access(Some(owner), stranger, Some(&digest), SALT, "1234"),
+            "the code alone does not open another player's furnace"
+        );
+    }
+
+    #[test]
+    fn a_furnace_smelt_finishes_after_the_matched_recipes_time() {
+        let mut state = FurnaceState {
+            burn: 1600,
+            burn_total: 1600,
+            progress: 0,
+            total: 200,
+        };
+        let input = FurnaceTick {
+            has_input: true,
+            recipe_time: Some(200),
+            fuel_time: 0,
+            output_ok: true,
+        };
+        let mut smelted = false;
+        for _ in 0..200 {
+            if furnace_tick(&mut state, input).smelt {
+                smelted = true;
+                break;
+            }
+        }
+        assert!(
+            smelted,
+            "the input smelts once the matched recipe's cooking time has passed"
+        );
+        assert!(state.burn < 1600, "fuel is consumed as the furnace burns");
     }
 }

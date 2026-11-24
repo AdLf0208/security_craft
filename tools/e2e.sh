@@ -83,6 +83,7 @@
 #   SELFTEST=smart tools/e2e.sh    # phase 3b expects a no-module cooldown: exit 1
 #   SELFTEST=disguise tools/e2e.sh # phase 18 expects no green tint: exit 1
 #   SELFTEST=container tools/e2e.sh # phase 19 expects a locked barrel's slots: exit 1
+#   SELFTEST=furnace tools/e2e.sh  # phase 20 expects a wrong code to leave the furnace's slots: exit 1
 #   CONTROL=1 tools/e2e.sh     # no package at all: the ids must be unknown
 #   GAME=<an unmodified game> tools/e2e.sh   # the differential: the first phase fails
 #
@@ -1339,6 +1340,145 @@ echo "barrel slot 300 after the relaunch: $reloaded x$reloaded_count"
 [ "$reloaded" = minecraft:iron_ingot ] && [ "$reloaded_count" = 8 ] \
     || fail "the barrel lost its saved contents across the relaunch ($reloaded x$reloaded_count)"
 ctl close >/dev/null 2>&1 || true
+
+say "phase 20: the passcode furnace cooks an input to the smelting output only with its code"
+# The jar's keypad_furnace is carried as a minecraft:furnace template: a three-slot
+# input/fuel/output container with the matched smelting recipe cooked on its tick. Its
+# `open` blockstate property is trimmed (26.3's furnace has only facing/lit), and the
+# code check is the harness command, as for the barrel. The vanilla furnace is the
+# no-code differential. Place beside the player's current position after the relaunch.
+CURX=$(ctl state | jq -r '.player.position[0] | floor')
+CURZ=$(ctl state | jq -r '.player.position[2] | floor')
+FX=$((CURX+2)); FY=101; FZ=$CURZ
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl wait 2
+ctl give securitycraft:keypad_furnace 1 >/dev/null || fail "the game refused securitycraft:keypad_furnace: the package is not loaded"
+ctl give minecraft:furnace 1 >/dev/null || fail "the game refused a vanilla furnace"
+ctl give minecraft:raw_iron 1 >/dev/null
+ctl give minecraft:coal 1 >/dev/null
+ctl wait 6
+ctl close >/dev/null 2>&1 || true
+ctl wait 2 >/dev/null
+echo "furnace target $FX,$FY,$FZ; player: $(ctl state | jq -c '.player.position')"
+
+# Differential first: an unprotected vanilla furnace opens with no code and shows its
+# three container slots. Removed before the passcode furnace so it cannot block a click.
+ctl select minecraft:furnace >/dev/null
+reply=$(ctl place "$FX" "$FY" "$FZ" 2>&1)
+echo "vanilla furnace place reply: $reply"
+echo "$reply" | jq -e '.changed == true' >/dev/null || fail "the vanilla furnace did not place ($reply)"
+ctl wait 4
+ctl look 180 0 >/dev/null
+ctl wait 2 >/dev/null
+ctl look-at block "$FX" "$FY" "$FZ" >/dev/null 2>&1 || true
+ctl interact "$FX" "$FY" "$FZ" >/dev/null || fail "the vanilla furnace did not open"
+ctl wait 6
+vanilla_fslots=$(ctl screen | jq '[.slots[]? | select(.slot >= 300)] | length')
+echo "unprotected vanilla furnace container slots: $vanilla_fslots"
+[ "$vanilla_fslots" = 3 ] || fail "the vanilla furnace showed $vanilla_fslots slots, expected 3"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4
+ctl command "setblock $FX $FY $FZ minecraft:air" >/dev/null
+ctl wait 4
+
+ctl select securitycraft:keypad_furnace >/dev/null
+reply=$(ctl place "$FX" "$FY" "$FZ" 2>&1)
+echo "passcode furnace place reply: $reply"
+echo "$reply" | jq -e '.changed == true' >/dev/null || fail "the passcode furnace did not place ($reply)"
+ctl wait 4
+echo "block after place: $(block_name "$FX" "$FY" "$FZ") / state $(block_state "$FX" "$FY" "$FZ")"
+block_name "$FX" "$FY" "$FZ" | grep -qx securitycraft:keypad_furnace || fail "no passcode furnace at $FX,$FY,$FZ"
+
+furnace_cmd() { ctl chat "/securitycraft $1 $FX $FY $FZ $2" 2>&1; ctl wait 4; }
+finfo() { ctl chat "/securitycraft cinfo $1 $2 $3" >/dev/null; ctl wait 4; ctl messages 8 | jq -r '.chat[]' | grep -m1 '^securitycraft furnace ' || true; }
+
+reply=$(furnace_cmd cset 5678); echo "furnace code set reply: $(echo "$reply" | jq -r '.chat[0] // .error // .' 2>/dev/null)"
+line=$(finfo "$FX" "$FY" "$FZ"); echo "coded furnace: $line"
+[ "$(field code "$line")" = set ] || fail "the furnace did not save its code: $line"
+[ "$(field open "$line")" = 0 ] || fail "a fresh coded furnace is already open: $line"
+[ "$(field owner "$line")" = set ] || fail "the furnace's placer is not its owner: $line"
+ctl command "clear @s" >/dev/null
+ctl wait 2
+
+# A wrong code writes no open permission: no menu, no slots.
+reply=$(furnace_cmd copen 9999); echo "wrong furnace code reply: $(echo "$reply" | jq -r '.chat[0] // .error // .' 2>/dev/null)"
+line=$(finfo "$FX" "$FY" "$FZ"); echo "after a wrong furnace code: $line"
+[ "$(field open "$line")" = 0 ] || fail "a wrong code left the furnace open: $line"
+ctl tp "$((FX+1)).5" "$FY" "$((FZ+2)).5" >/dev/null
+ctl wait 4
+ctl look 180 0 >/dev/null
+ctl wait 2
+ctl look-at block "$FX" "$FY" "$FZ" >/dev/null 2>&1 || true
+ctl interact "$FX" "$FY" "$FZ" >/dev/null 2>&1 || true
+ctl wait 6
+furnace_locked_screen=$(ctl screen | jq -r '.screen // "unknown"')
+furnace_locked_slots=$(ctl screen | jq '[.slots[]? | select(.slot >= 300)] | length')
+echo "wrong-code furnace click: screen=$furnace_locked_screen container slots=$furnace_locked_slots"
+if [ "$SELFTEST" = furnace ]; then
+    [ "$furnace_locked_slots" -gt 0 ] || fail "SELFTEST: expected a wrong code to leave the furnace's contents unreadable"
+fi
+[ "$furnace_locked_screen" = playing ] || fail "a wrong code opened the furnace menu (screen=$furnace_locked_screen)"
+[ "$furnace_locked_slots" = 0 ] || fail "a wrong code exposed the furnace's $furnace_locked_slots container slots"
+ctl close >/dev/null 2>&1 || true
+
+# The right code grants the one-shot open; the block-backed menu shows three slots.
+reply=$(furnace_cmd copen 5678); echo "right furnace code reply: $(echo "$reply" | jq -r '.chat[0] // .error // .' 2>/dev/null)"
+line=$(finfo "$FX" "$FY" "$FZ"); echo "after the right furnace code: $line"
+[ "$(field open "$line")" = 1 ] || fail "the right code did not grant the furnace open: $line"
+ctl look 180 0 >/dev/null
+ctl wait 2 >/dev/null
+ctl look-at block "$FX" "$FY" "$FZ" >/dev/null 2>&1 || true
+reply=$(ctl interact "$FX" "$FY" "$FZ" 2>&1 || true)
+echo "furnace unlocked interact: player=$(ctl state | jq -c '.player.position') reply=$reply"
+echo "$reply" | jq -e '.ok == true' >/dev/null || fail "the unlocked furnace did not open ($reply)"
+ctl wait 6
+furnace_slots=$(ctl screen | jq '[.slots[]? | select(.slot >= 300)] | length')
+echo "unlocked furnace container slots: $furnace_slots"
+[ "$furnace_slots" = 3 ] || fail "the unlocked furnace showed $furnace_slots slots, expected 3"
+
+# Feed raw iron and coal through the block's own container slots, then let the matched
+# smelting recipe cook: the output slot holds the artefact's cooked output (iron ingot).
+ctl command "item replace block $FX $FY $FZ container.0 with minecraft:raw_iron 1" >/dev/null
+ctl command "item replace block $FX $FY $FZ container.1 with minecraft:coal 1" >/dev/null
+ctl wait 260
+furnace_out=$(ctl screen | jq -r '[.slots[]? | select(.slot == 302) | .item][0] // "empty"')
+furnace_out_count=$(ctl screen | jq -r '[.slots[]? | select(.slot == 302) | .count][0] // 0')
+echo "furnace output slot 302: $furnace_out x$furnace_out_count"
+[ "$furnace_out" = minecraft:iron_ingot ] && [ "$furnace_out_count" = 1 ] \
+    || fail "the furnace did not cook raw iron into one iron ingot ($furnace_out x$furnace_out_count)"
+furnace_state=$(block_state "$FX" "$FY" "$FZ")
+echo "furnace state while burning: $furnace_state"
+echo "$furnace_state" | grep -q 'lit=true' || fail "the furnace did not light while burning ($furnace_state)"
+furnace_input=$(ctl screen | jq -r '[.slots[]? | select(.slot == 300) | .item][0] // "empty"')
+echo "furnace input slot 300 after the cook: $furnace_input"
+[ "$furnace_input" = empty ] || fail "the cooked input was not consumed ($furnace_input)"
+line=$(finfo "$FX" "$FY" "$FZ"); echo "furnace while open: $line"
+ctl close >/dev/null 2>&1 || true
+ctl wait 4
+line=$(finfo "$FX" "$FY" "$FZ"); echo "furnace after closing: $line"
+[ "$(field open "$line")" = 0 ] || fail "the furnace's one-shot open was not spent at close: $line"
+
+# A code and the cooked output survive a quit-and-relaunch.
+ctl quit >/dev/null 2>&1 || true
+sleep 5
+launch SecurityCraftE2E
+ctl wait 20 >/dev/null
+line=$(finfo "$FX" "$FY" "$FZ"); echo "furnace after the relaunch: $line"
+[ "$(field code "$line")" = set ] || fail "the relaunch lost the furnace's code: $line"
+furnace_cmd copen 5678 >/dev/null
+ctl look 180 0 >/dev/null
+ctl wait 2 >/dev/null
+ctl look-at block "$FX" "$FY" "$FZ" >/dev/null 2>&1 || true
+ctl interact "$FX" "$FY" "$FZ" >/dev/null || fail "the relaunched furnace did not open"
+ctl wait 6
+reloaded_furnace=$(ctl screen | jq -r '[.slots[]? | select(.slot == 302) | .item][0] // "empty"')
+echo "furnace output slot 302 after the relaunch: $reloaded_furnace"
+[ "$reloaded_furnace" = minecraft:iron_ingot ] \
+    || fail "the furnace lost its cooked output across the relaunch ($reloaded_furnace)"
+ctl close >/dev/null 2>&1 || true
+
+echo "PASS-furnace: the passcode furnace saved its owner and code, a wrong code left no menu and no slots, the right code opened its three-slot block-backed menu, raw iron and coal cooked into one iron ingot with the input consumed and lit=true, and the code and output survived a relaunch; an unprotected vanilla furnace opened with no code"
 
 echo "PASS: the key panel placed a keypad and the reinforced door item placed both halves; a fresh keypad set a code without opening anything (a three-digit code refused); a wrong code left the reinforced door closed; a reopened screen started empty and five wrong codes did NOT rate-limit a correct one without the smart module; the right code then powered the keypad and opened the door beside it; the door closed when the signal ran out; a second keypad with the same code but no door powered on and opened nothing; an empty submit stored nothing; and a hand click cannot open the reinforced door; the harming module recipe crafted from seven iron, paper and an arrow and consumed them; the placer became the keypad's owner, the owner installed the module, a wrong code took two hearts and a right code none, and the module dropped when the keypad broke — and survived a level-side /setblock removal as a dropped item; a keypad without the module did not hurt a wrong code; and only the owner may set a keypad's first code — a stranger's click opened no set screen, a set screen that outlived an owner change stored nothing, the owner set it, and a stranger's /securitycraft code was refused; the allowlist module crafted from seven iron and two paper was installed on a coded keypad and an allowed click with nothing typed powered it and opened its door without a code screen, while swapping the player for a stranger restored the code screen and left the door closed; the denylist module crafted from seven iron, paper and an ink sac was installed on a coded keypad and a listed player's click opened nothing, powered nothing and left the door closed, while swapping the list to a stranger restored the code screen with the door still closed; the smart module crafted from seven iron, paper and an ender pearl was installed on a second coded keypad and five wrong codes then made the right one read status=6 with the keypad unpowered and the door closed, while the same five wrong codes on a keypad without the module still opened it; the disguise module crafted from seven iron, paper and a painting was installed on a fresh keypad and an --offscreen screenshot of that very keypad changed from its own texture to the fixed green tint (a parsed pixel difference, inverted by SELFTEST=disguise); and after quitting and relaunching the same world the code stored before the restart still opens the keypad and a wrong code is still refused; the passcode barrel saved its owner and code, a wrong code left it closed with no container slots (inverted by SELFTEST=container), the right code opened its 27 vanilla slots, eight ingots deposited there and survived a restart, an unknown id was refused, and an unprotected vanilla barrel opened without any code"
 # The cleanup trap prints the run's exit status as the last line.
